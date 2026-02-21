@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import parseInput from "./parser";
 import canonicalize from "./canonicalize";
 import statsEngine from "./statsEngine";
@@ -10,6 +10,200 @@ const severityRank = {
   medium: 2,
   low: 1,
 };
+
+const SAMPLE_TEXT_PLAN = `
+GroupAggregate  (cost=8421934.22..12481234.77 rows=1823456 width=64) (actual time=81234.221..104567.882 rows=52341 loops=1)
+  Group Key: c.region, p.category_name
+  Buffers: shared hit=412345 read=5823412, temp read=845212 written=846001
+  ->  Gather Merge  (cost=8421934.22..11934567.11 rows=27567891 width=72) (actual time=81234.177..91234.445 rows=27651234 loops=1)
+        Workers Planned: 3
+        Workers Launched: 2
+        Buffers: shared hit=412345 read=5823412, temp read=832111 written=832945
+        ->  Sort  (cost=8420934.20..8447567.55 rows=9189297 width=72) (actual time=81123.451..83456.991 rows=13825617 loops=3)
+              Sort Key: c.region, p.category_name
+              Sort Method: external merge  Disk: 1203944kB
+              Buffers: shared hit=412345 read=5823412, temp read=832111 written=832945
+              ->  Hash Join  (cost=215.55..5234678.11 rows=9189297 width=72) (actual time=35.221..72345.881 rows=13825617 loops=3)
+                    Hash Cond: (oi.product_id = p.id)
+                    Buffers: shared hit=401222 read=5823412
+                    ->  Nested Loop  (cost=0.85..4982345.44 rows=9189297 width=58) (actual time=1.122..68221.334 rows=13825617 loops=3)
+                          Buffers: shared hit=399876 read=5823412
+                          ->  Parallel Seq Scan on order_items oi  (cost=0.00..4123456.00 rows=11234567 width=32) (actual time=0.995..54321.771 rows=16890234 loops=3)
+                                Filter: (status = 'completed')
+                                Rows Removed by Filter: 3456789
+                                Buffers: shared hit=123456 read=5823412
+                          ->  Memoize  (cost=0.85..1.02 rows=1 width=26) (actual time=0.001..0.001 rows=1 loops=50670651)
+                                Cache Key: oi.order_id
+                                Cache Mode: logical
+                                Hits: 48901234  Misses: 1765417
+                                ->  Index Scan using idx_orders_id on orders o
+                                      Index Cond: (id = oi.order_id)
+                    ->  Hash  (cost=185.00..185.00 rows=2400 width=22) (actual time=28.441..28.442 rows=2400 loops=3)
+                          Buckets: 4096  Batches: 1  Memory Usage: 212kB
+                          ->  Seq Scan on products p  (cost=0.00..185.00 rows=2400 width=22) (actual time=0.012..12.441 rows=2400 loops=3)
+Planning Time: 2.113 ms
+Execution Time: 104899.552 ms
+`;
+
+const SAMPLE_JSON_PLAN = JSON.stringify([
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Startup Cost": 8421934.22,
+      "Total Cost": 12481234.77,
+      "Plan Rows": 1823456,
+      "Plan Width": 64,
+      "Actual Startup Time": 81234.221,
+      "Actual Total Time": 104567.882,
+      "Actual Rows": 52341,
+      "Actual Loops": 1,
+      "Group Key": ["c.region", "p.category_name"],
+      "Shared Hit Blocks": 412345,
+      "Shared Read Blocks": 5823412,
+      "Temp Read Blocks": 845212,
+      "Temp Written Blocks": 846001,
+      "Plans": [
+        {
+          "Node Type": "Gather Merge",
+          "Startup Cost": 8421934.22,
+          "Total Cost": 11934567.11,
+          "Plan Rows": 27567891,
+          "Plan Width": 72,
+          "Actual Startup Time": 81234.177,
+          "Actual Total Time": 91234.445,
+          "Actual Rows": 27651234,
+          "Actual Loops": 1,
+          "Workers Planned": 3,
+          "Workers Launched": 2,
+          "Shared Hit Blocks": 412345,
+          "Shared Read Blocks": 5823412,
+          "Temp Read Blocks": 832111,
+          "Temp Written Blocks": 832945,
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Startup Cost": 8420934.20,
+              "Total Cost": 8447567.55,
+              "Plan Rows": 9189297,
+              "Plan Width": 72,
+              "Actual Startup Time": 81123.451,
+              "Actual Total Time": 83456.991,
+              "Actual Rows": 13825617,
+              "Actual Loops": 3,
+              "Sort Key": ["c.region", "p.category_name"],
+              "Sort Method": "external merge",
+              "Sort Space Used": 1203944,
+              "Sort Space Type": "Disk",
+              "Shared Hit Blocks": 412345,
+              "Shared Read Blocks": 5823412,
+              "Temp Read Blocks": 832111,
+              "Temp Written Blocks": 832945,
+              "Plans": [
+                {
+                  "Node Type": "Hash Join",
+                  "Startup Cost": 215.55,
+                  "Total Cost": 5234678.11,
+                  "Plan Rows": 9189297,
+                  "Plan Width": 72,
+                  "Actual Startup Time": 35.221,
+                  "Actual Total Time": 72345.881,
+                  "Actual Rows": 13825617,
+                  "Actual Loops": 3,
+                  "Hash Cond": "(oi.product_id = p.id)",
+                  "Shared Hit Blocks": 401222,
+                  "Shared Read Blocks": 5823412,
+                  "Plans": [
+                    {
+                      "Node Type": "Nested Loop",
+                      "Startup Cost": 0.85,
+                      "Total Cost": 4982345.44,
+                      "Plan Rows": 9189297,
+                      "Plan Width": 58,
+                      "Actual Startup Time": 1.122,
+                      "Actual Total Time": 68221.334,
+                      "Actual Rows": 13825617,
+                      "Actual Loops": 3,
+                      "Shared Hit Blocks": 399876,
+                      "Shared Read Blocks": 5823412,
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Relation Name": "order_items",
+                          "Alias": "oi",
+                          "Startup Cost": 0.00,
+                          "Total Cost": 4123456.00,
+                          "Plan Rows": 11234567,
+                          "Plan Width": 32,
+                          "Actual Startup Time": 0.995,
+                          "Actual Total Time": 54321.771,
+                          "Actual Rows": 16890234,
+                          "Actual Loops": 3,
+                          "Filter": "(status = 'completed')",
+                          "Rows Removed by Filter": 3456789,
+                          "Shared Hit Blocks": 123456,
+                          "Shared Read Blocks": 5823412
+                        },
+                        {
+                          "Node Type": "Memoize",
+                          "Startup Cost": 0.85,
+                          "Total Cost": 1.02,
+                          "Plan Rows": 1,
+                          "Plan Width": 26,
+                          "Actual Startup Time": 0.001,
+                          "Actual Total Time": 0.001,
+                          "Actual Rows": 1,
+                          "Actual Loops": 50670651,
+                          "Cache Key": "oi.order_id",
+                          "Cache Mode": "logical",
+                          "Cache Hits": 48901234,
+                          "Cache Misses": 1765417,
+                          "Plans": [
+                            {
+                              "Node Type": "Index Scan",
+                              "Index Name": "idx_orders_id",
+                              "Relation Name": "orders",
+                              "Alias": "o",
+                              "Index Cond": "(id = oi.order_id)"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Hash",
+                      "Startup Cost": 185.00,
+                      "Total Cost": 185.00,
+                      "Plan Rows": 2400,
+                      "Plan Width": 22,
+                      "Actual Startup Time": 28.441,
+                      "Actual Total Time": 28.442,
+                      "Actual Rows": 2400,
+                      "Actual Loops": 3,
+                      "Hash Buckets": 4096,
+                      "Hash Batches": 1,
+                      "Peak Memory Usage": 212,
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Relation Name": "products",
+                          "Alias": "p"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Planning Time": 2.113,
+    "Execution Time": 104899.552
+  }
+], null, 2);
+
 function getFoldedEstimateErrorFromRatio(ratio) {
   if (!Number.isFinite(ratio) || ratio <= 0) return Number.POSITIVE_INFINITY;
   return Math.max(ratio, 1 / ratio);
@@ -377,8 +571,28 @@ function getOptimizationPriorityNode(root) {
   return best;
 }
 
+function detectInputType(value) {
+  const text = String(value || "").trim();
+  if (!text) return "neutral";
+
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed) && parsed[0]?.Plan) return "valid-json-plan";
+    if (!Array.isArray(parsed) && parsed?.Plan) return "valid-json-plan";
+  } catch {
+    // Fallback to text detection.
+  }
+
+  if (/\(cost=/.test(text) || /\(actual\s+time=/.test(text)) {
+    return "valid-text-plan";
+  }
+
+  return "invalid-input";
+}
+
 function App() {
   const [input, setInput] = useState("");
+  const [inputType, setInputType] = useState("neutral");
   const [beginnerMode, setBeginnerMode] = useState(true);
   const [tree, setTree] = useState(null);
   const [insights, setInsights] = useState([]);
@@ -395,6 +609,7 @@ function App() {
   const [topIssuesCollapsed, setTopIssuesCollapsed] = useState(false);
   const [nodeTypeStatsCollapsed, setNodeTypeStatsCollapsed] = useState(false);
   const [relationStatsCollapsed, setRelationStatsCollapsed] = useState(false);
+  const [stickyHeaderActive, setStickyHeaderActive] = useState(false);
   const statsRef = useRef(null);
   const executionTreeRef = useRef(null);
   const nodeRefs = useRef(new Map());
@@ -427,6 +642,15 @@ function App() {
     }
     return map;
   }, [insights]);
+
+  useEffect(() => {
+    const onScroll = () => {
+      setStickyHeaderActive(window.scrollY > 6);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
 
   function registerNodeRef(nodeId, element) {
     if (!nodeId) return;
@@ -491,6 +715,19 @@ function App() {
     }
   }
 
+  const handleInputChange = (value) => {
+    setInput(value);
+    setInputType(detectInputType(value));
+  };
+
+  const handleSampleText = () => {
+    handleInputChange(SAMPLE_TEXT_PLAN);
+  };
+
+  const handleSampleJson = () => {
+    handleInputChange(SAMPLE_JSON_PLAN);
+  };
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -523,6 +760,11 @@ function App() {
             <span className="brand-tagline">PostgreSQL plan insights</span>
           </div>
         </div>
+        {stickyHeaderActive && inputType === "valid-text-plan" && tree && (
+          <div className="input-warning warning-yellow sticky-header-warning">
+            Text-based EXPLAIN plan may produce inaccurate results and insights. For best accuracy, use JSON format.
+          </div>
+        )}
       </header>
 
       <section className="section-card first-accordion">
@@ -543,14 +785,43 @@ function App() {
         </div>
         {!inputCollapsed && (
           <div className="section-body input-panel">
+            {inputType === "valid-text-plan" && (
+              <div className="input-warning warning-yellow">
+                Text-based EXPLAIN output detected. JSON format provides more accurate parsing and is recommended for
+                best results.
+              </div>
+            )}
+            {inputType === "valid-json-plan" && (
+              <div className="input-warning warning-green">
+                Valid JSON plan detected. This is the recommended format.
+              </div>
+            )}
+            {inputType === "invalid-input" && (
+              <div className="input-warning warning-red">
+                This input does not appear to be a valid PostgreSQL EXPLAIN plan.
+              </div>
+            )}
+            <div className={`plan-input-container ${inputType}`}>
             <textarea
               rows={12}
               value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder="Paste EXPLAIN ANALYZE output (JSON or text)..."
+              onChange={(event) => handleInputChange(event.target.value)}
+              placeholder={`Paste PostgreSQL EXPLAIN ANALYZE output here.
+
+Recommended: Use JSON format for best accuracy:
+EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) <your_query>;
+
+Note: pgAdmin's default text output is supported but may produce less accurate insights.`}
             />
+            </div>
             <div className="input-actions">
               <button onClick={analyze}>Analyze Plan</button>
+              <button type="button" className="sample-btn" onClick={handleSampleJson}>
+                Sample JSON Plan
+              </button>
+              <button type="button" className="sample-btn" onClick={handleSampleText}>
+                Sample TEXT Plan
+              </button>
             </div>
             {parseError && <div className="error-banner">{parseError}</div>}
           </div>

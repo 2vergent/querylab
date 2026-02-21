@@ -286,6 +286,59 @@ body {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 
+.plan-input-container {
+  border-radius: var(--radius-md);
+  transition: box-shadow 0.2s ease;
+}
+
+.plan-input-container.valid-json-plan {
+  box-shadow:
+    0 0 0 2px rgba(16, 185, 129, 0.4),
+    0 4px 16px rgba(16, 185, 129, 0.15);
+}
+
+.plan-input-container.valid-text-plan {
+  box-shadow:
+    0 0 0 2px rgba(245, 158, 11, 0.4),
+    0 4px 16px rgba(245, 158, 11, 0.15);
+}
+
+.plan-input-container.invalid-input {
+  box-shadow:
+    0 0 0 2px rgba(239, 68, 68, 0.5),
+    0 4px 16px rgba(239, 68, 68, 0.2);
+}
+
+.input-warning {
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.warning-yellow {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+}
+
+.warning-green {
+  background: #ecfdf5;
+  border: 1px solid #6ee7b7;
+  color: #065f46;
+}
+
+.warning-red {
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  color: #7f1d1d;
+}
+
+.sticky-header-warning {
+  margin: 8px 0 0;
+}
+
 .input-panel textarea:focus,
 input:focus {
   outline: 2px solid transparent;
@@ -295,6 +348,26 @@ input:focus {
 
 .input-actions {
   margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sample-btn {
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #374151;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: none;
+  font-size: 13px;
+}
+
+.sample-btn:hover {
+  background: #f3f4f6;
+  filter: none;
 }
 
 .input-panel {
