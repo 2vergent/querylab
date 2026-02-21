@@ -47,6 +47,28 @@ function buildSummary(root) {
     (max, node) => Math.max(max, node.derived.amplificationFactor || 0),
     0,
   );
+  const sharedReads = nodes.reduce((sum, node) => sum + node.buffers.sharedRead, 0);
+  const tempWrites = nodes.reduce((sum, node) => sum + node.buffers.tempWritten, 0);
+  const totalNodes = nodes.length;
+  const leafNodes = nodes.filter((node) => node.children.length === 0).length;
+  const seqScanCount = nodes.filter((node) => node.nodeType === "Seq Scan").length;
+  const worstTimeShare = nodes.reduce(
+    (best, node) => (node.derived.timePercent > (best?.derived.timePercent ?? -1) ? node : best),
+    null,
+  );
+  const estimateErrors = nodes.map((node) => {
+    const ratio = node.derived.rowEstimateRatio;
+    return !Number.isFinite(ratio) || ratio <= 0 ? Number.POSITIVE_INFINITY : Math.max(ratio, 1 / ratio);
+  });
+  const finiteErrors = estimateErrors.filter((value) => Number.isFinite(value));
+  const avgEstimateError =
+    finiteErrors.length > 0 ? finiteErrors.reduce((sum, value) => sum + value, 0) / finiteErrors.length : Infinity;
+  const parallelPlanned = nodes.reduce((sum, node) => sum + node.workers.planned, 0);
+  const parallelLaunched = nodes.reduce((sum, node) => sum + node.workers.launched, 0);
+  const parallelUtilization = parallelPlanned > 0 ? parallelLaunched / parallelPlanned : 1;
+  const totalRowsProcessed = nodes.reduce((sum, node) => sum + node.actual.rows * node.actual.loops, 0);
+  const rowThroughput =
+    root.derived.effectiveTime > 0 ? totalRowsProcessed / (root.derived.effectiveTime / 1000) : 0;
 
   return {
     totalExecutionTime: root.derived.effectiveTime,
@@ -55,6 +77,16 @@ function buildSummary(root) {
     totalDiskReads,
     hasSpill,
     maxJoinAmplification,
+    sharedReads,
+    tempWrites,
+    totalNodes,
+    leafNodes,
+    seqScanCount,
+    worstTimeShare,
+    avgEstimateError,
+    parallelUtilization,
+    totalRowsProcessed,
+    rowThroughput,
   };
 }
 
@@ -265,17 +297,27 @@ function App() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <h1>PostgreSQL Execution Analysis Instrument</h1>
-        <p>Deterministic execution plan parsing, metric derivation, and engineering-grade insights.</p>
+        <div className="header-row">
+          <div className="brand-line">
+            <span className="brand-banner">Query Lab</span>
+            <span className="brand-tagline">PostgreSQL plan insights</span>
+          </div>
+        </div>
       </header>
 
       <section className="panel input-panel">
+        <div className="input-panel-header">
+          <h2>Plan Input</h2>
+          <span>Paste `EXPLAIN ANALYZE` output (JSON or text)</span>
+        </div>
+        <div className="input-editor-wrap">
         <textarea
           rows={12}
           value={input}
           onChange={(event) => setInput(event.target.value)}
           placeholder="Paste EXPLAIN ANALYZE output (JSON or text)..."
         />
+        </div>
         <div className="input-actions">
           <button onClick={analyze}>Analyze Plan</button>
         </div>
@@ -284,37 +326,12 @@ function App() {
 
       {tree && summary && (
         <>
-          <section className="panel controls-panel">
-            <div className="control-row">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={useSelfTime}
-                  onChange={(event) => setUseSelfTime(event.target.checked)}
-                />
-                Show self time instead of total time
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={highlightMismatch}
-                  onChange={(event) => setHighlightMismatch(event.target.checked)}
-                />
-                Highlight row estimate mismatch
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={showEstVsActual}
-                  onChange={(event) => setShowEstVsActual(event.target.checked)}
-                />
-                Show estimated vs actual
-              </label>
-            </div>
-          </section>
-
           <section ref={statsSectionRef} className="panel summary-grid">
-            <SummaryCard title="Total Execution Time" value={`${formatNumber(summary.totalExecutionTime)} ms`} />
+            <SummaryCard
+              title="Total Execution Time"
+              value={`${formatNumber(summary.totalExecutionTime)} ms`}
+              description="Total inclusive runtime for the entire plan tree."
+            />
             <SummaryCard
               title="Worst Self Time Node"
               value={
@@ -322,6 +339,7 @@ function App() {
                   ? `${summary.worstSelf.nodeType} (${formatNumber(summary.worstSelf.derived.selfTime)} ms)`
                   : "N/A"
               }
+              description="Operator spending the most exclusive (self) time."
             />
             <SummaryCard
               title="Worst Estimate Mismatch"
@@ -330,12 +348,71 @@ function App() {
                   ? `${summary.worstMismatch.node.nodeType} (${formatNumber(summary.worstMismatch.score)}x)`
                   : "N/A"
               }
+              description="Largest divergence between planner estimate and actual rows."
             />
-            <SummaryCard title="Total Disk Reads" value={formatNumber(summary.totalDiskReads, 0)} />
-            <SummaryCard title="Spill Indicator" value={summary.hasSpill ? "Spill Detected" : "No Spill"} />
+            <SummaryCard
+              title="Total Disk Reads"
+              value={formatNumber(summary.totalDiskReads, 0)}
+              description="Total read blocks across shared/local/temp buffers."
+            />
+            <SummaryCard
+              title="Spill Indicator"
+              value={summary.hasSpill ? "Spill Detected" : "No Spill"}
+              description="Flags sort/temp disk spill activity in any node."
+            />
             <SummaryCard
               title="Join Amplification"
               value={`${formatNumber(summary.maxJoinAmplification)}x max`}
+              description="Maximum child-row-to-output-row amplification among join nodes."
+            />
+            <SummaryCard
+              title="Shared Read Blocks"
+              value={formatNumber(summary.sharedReads, 0)}
+              description="Physical shared-buffer reads from storage."
+            />
+            <SummaryCard
+              title="Temp Written Blocks"
+              value={formatNumber(summary.tempWrites, 0)}
+              description="Temporary blocks written, usually from spills or hashing."
+            />
+            <SummaryCard
+              title="Plan Shape"
+              value={`${formatNumber(summary.totalNodes, 0)} nodes / ${formatNumber(summary.leafNodes, 0)} leaves`}
+              description="Operator count and leaf-node count in this execution tree."
+            />
+            <SummaryCard
+              title="Seq Scan Count"
+              value={formatNumber(summary.seqScanCount, 0)}
+              description="Number of sequential scan operators in the plan."
+            />
+            <SummaryCard
+              title="Hotspot Share"
+              value={
+                summary.worstTimeShare
+                  ? `${summary.worstTimeShare.nodeType} (${formatNumber(summary.worstTimeShare.derived.timePercent * 100)}%)`
+                  : "N/A"
+              }
+              description="Node consuming the highest share of total inclusive time."
+            />
+            <SummaryCard
+              title="Avg Estimate Error"
+              value={`${formatNumber(summary.avgEstimateError)}x`}
+              description="Average row estimate error factor across nodes."
+            />
+            <SummaryCard
+              title="Parallel Utilization"
+              value={`${formatNumber(summary.parallelUtilization * 100)}%`}
+              description="Total launched workers divided by total planned workers."
+            />
+            <SummaryCard
+              title="Total Rows Processed"
+              value={formatNumber(summary.totalRowsProcessed, 0)}
+              description="Sum of actual rows multiplied by loops across all plan nodes."
+            />
+            <SummaryCard
+              title="Row Throughput"
+              value={`${formatNumber(summary.rowThroughput, 0)} rows/s`}
+              description="Estimated processing speed based on rows processed over total execution time."
             />
           </section>
 
@@ -362,6 +439,32 @@ function App() {
                   Collapse All
                 </button>
               </div>
+            </div>
+            <div className="execution-controls">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={useSelfTime}
+                  onChange={(event) => setUseSelfTime(event.target.checked)}
+                />
+                Show self time instead of total time
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={highlightMismatch}
+                  onChange={(event) => setHighlightMismatch(event.target.checked)}
+                />
+                Highlight row estimate mismatch
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={showEstVsActual}
+                  onChange={(event) => setShowEstVsActual(event.target.checked)}
+                />
+                Show estimated vs actual
+              </label>
             </div>
             <TreeNode
               key={`${tree.id}-${treeRenderSeed}`}
@@ -429,10 +532,15 @@ function App() {
   );
 }
 
-function SummaryCard({ title, value }) {
+function SummaryCard({ title, value, description }) {
   return (
     <article className="summary-card">
-      <h3>{title}</h3>
+      <div className="summary-card-header">
+        <h3>{title}</h3>
+        <span className="info-dot" title={description}>
+          i
+        </span>
+      </div>
       <p>{value}</p>
     </article>
   );
