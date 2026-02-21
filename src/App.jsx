@@ -486,7 +486,6 @@ function App() {
         <div className="header-row">
           <div className="brand-line">
             <span className="brand-banner">Query Lab</span>
-            <span className="brand-tagline">PostgreSQL plan insights</span>
             <label className="mode-toggle" title="Toggle between beginner and advanced analysis views.">
               <span className={`mode-label ${beginnerMode ? "active" : ""}`}>Basic</span>
               <input
@@ -503,6 +502,7 @@ function App() {
               <span className="mode-slider" />
               <span className={`mode-label ${!beginnerMode ? "active" : ""}`}>Advanced</span>
             </label>
+            <span className="brand-tagline">PostgreSQL plan insights</span>
           </div>
         </div>
       </header>
