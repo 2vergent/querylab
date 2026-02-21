@@ -450,6 +450,17 @@ function App() {
     }, 2000);
   }
 
+  function scrollToSectionWithHeaderOffset(element) {
+    if (!element) return;
+    const header = document.querySelector(".app-header");
+    const headerOffset = header ? header.getBoundingClientRect().height + 10 : 0;
+    const top = element.getBoundingClientRect().top + window.scrollY - headerOffset;
+    window.scrollTo({
+      top: Math.max(0, top),
+      behavior: "smooth",
+    });
+  }
+
   function analyze() {
     setParseError("");
     try {
@@ -468,9 +479,9 @@ function App() {
       setInputCollapsed(true);
       setTimeout(() => {
         if (beginnerMode) {
-          statsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+          scrollToSectionWithHeaderOffset(statsRef.current);
         } else {
-          executionTreeRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+          scrollToSectionWithHeaderOffset(executionTreeRef.current);
         }
       }, 100);
     } catch (error) {
@@ -485,7 +496,14 @@ function App() {
       <header className="app-header">
         <div className="header-row">
           <div className="brand-line">
-            <span className="brand-banner">Query Lab</span>
+            <button
+              type="button"
+              className="brand-banner"
+              onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+              title="Scroll to top"
+            >
+              Query Lab
+            </button>
             <label className="mode-toggle" title="Toggle between beginner and advanced analysis views.">
               <span className={`mode-label ${beginnerMode ? "active" : ""}`}>Basic</span>
               <input

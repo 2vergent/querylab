@@ -74,6 +74,15 @@ body {
     linear-gradient(180deg, #0a1118 0%, var(--bg) 100%);
 }
 
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  padding: 8px 0 10px;
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: blur(6px);
+}
+
 .header-row {
   display: flex;
   align-items: flex-start;
@@ -96,6 +105,18 @@ body {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  outline: none;
+}
+
+.brand-banner:hover {
+  background: var(--surface-soft);
+}
+
+.brand-banner:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 20%, transparent), var(--shadow-soft);
 }
 
 .brand-line {
