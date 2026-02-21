@@ -59,10 +59,13 @@ export default function ruleEngine(tree) {
     function estimateMismatch(node) {
       const ratio = node.derived.rowEstimateRatio;
       if (!Number.isFinite(ratio) || ratio <= 0) {
+        const severe = (node.derived.timePercent || 0) > 0.1;
         addInsight(node, {
-          severity: "high",
+          severity: severe ? "high" : "medium",
           category: "Cardinality",
-          title: "Severe row estimate mismatch (>10x)",
+          title: severe
+            ? "Severe row estimate mismatch (>10x)"
+            : "Row estimate mismatch (>10x, low impact)",
           explanation:
             "Planner estimated zero or near-zero rows while execution returned rows, showing a major cardinality model error.",
           recommendation:
@@ -73,10 +76,13 @@ export default function ruleEngine(tree) {
 
       const folded = Math.max(ratio, 1 / ratio);
       if (folded > 10) {
+        const severe = (node.derived.timePercent || 0) > 0.1;
         addInsight(node, {
-          severity: "high",
+          severity: severe ? "high" : "medium",
           category: "Cardinality",
-          title: "Severe row estimate mismatch (>10x)",
+          title: severe
+            ? "Severe row estimate mismatch (>10x)"
+            : "Row estimate mismatch (>10x, low impact)",
           explanation:
             "Actual row count diverged from estimate by more than 10x, which can cause poor join order and operator choices.",
           recommendation:

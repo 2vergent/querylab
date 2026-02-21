@@ -10,6 +10,16 @@ const severityRank = {
   medium: 2,
   low: 1,
 };
+const severityBorderColor = {
+  high: "#d43c4c",
+  medium: "#cc8a1d",
+  low: "#3f6fd8",
+};
+
+function getFoldedEstimateErrorFromRatio(ratio) {
+  if (!Number.isFinite(ratio) || ratio <= 0) return Number.POSITIVE_INFINITY;
+  return Math.max(ratio, 1 / ratio);
+}
 
 function flattenTree(root) {
   const nodes = [];
@@ -36,7 +46,7 @@ function buildSummary(root) {
   );
   const worstMismatch = nodes.reduce((best, node) => {
     const ratio = node.derived.rowEstimateRatio;
-    const folded = !Number.isFinite(ratio) || ratio <= 0 ? Number.POSITIVE_INFINITY : Math.max(ratio, 1 / ratio);
+    const folded = getFoldedEstimateErrorFromRatio(ratio);
     const bestRatio = best?.score ?? -1;
     return folded > bestRatio ? { node, score: folded } : best;
   }, null);
@@ -58,7 +68,7 @@ function buildSummary(root) {
   );
   const estimateErrors = nodes.map((node) => {
     const ratio = node.derived.rowEstimateRatio;
-    return !Number.isFinite(ratio) || ratio <= 0 ? Number.POSITIVE_INFINITY : Math.max(ratio, 1 / ratio);
+    return getFoldedEstimateErrorFromRatio(ratio);
   });
   const finiteErrors = estimateErrors.filter((value) => Number.isFinite(value));
   const avgEstimateError =
@@ -69,6 +79,12 @@ function buildSummary(root) {
   const totalRowsProcessed = nodes.reduce((sum, node) => sum + node.actual.rows * node.actual.loops, 0);
   const rowThroughput =
     root.derived.effectiveTime > 0 ? totalRowsProcessed / (root.derived.effectiveTime / 1000) : 0;
+  const relationCount = new Set(
+    nodes.map((node) => node.relationName).filter(Boolean),
+  ).size;
+  const complexityScore = totalNodes + (maxJoinAmplification > 10 ? 5 : 0) + seqScanCount * 2;
+  const complexityLabel =
+    complexityScore < 20 ? "Low" : complexityScore <= 50 ? "Moderate" : "High";
 
   return {
     totalExecutionTime: root.derived.effectiveTime,
@@ -87,6 +103,9 @@ function buildSummary(root) {
     parallelUtilization,
     totalRowsProcessed,
     rowThroughput,
+    relationCount,
+    complexityScore,
+    complexityLabel,
   };
 }
 
@@ -241,8 +260,132 @@ function getInsightSeverityForNode(nodeId, insights) {
   }, null);
 }
 
+function computeQueryHealth(summary, insights) {
+  const highCount = insights.filter((insight) => insight.severity === "high").length;
+  const mediumCount = insights.filter((insight) => insight.severity === "medium").length;
+  const worstShare = summary?.worstTimeShare?.derived?.timePercent || 0;
+
+  if (highCount > 0) {
+    return { label: "Poor", score: 30 };
+  }
+
+  if (summary.hasSpill && worstShare > 0.3) {
+    return { label: "Poor", score: 35 };
+  }
+
+  if (summary.avgEstimateError > 5) {
+    return { label: "Moderate", score: 62 };
+  }
+
+  if (highCount === 0 && mediumCount === 0) {
+    return { label: "Good", score: 90 };
+  }
+
+  return { label: "Moderate", score: 70 };
+}
+
+function groupIssuesForDisplay(insights) {
+  const grouped = new Map();
+  for (const insight of insights) {
+    const key = [
+      insight.severity || "",
+      insight.category || "",
+      insight.title || "",
+      insight.explanation || "",
+      insight.recommendation || "",
+    ].join("::");
+
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        severity: insight.severity,
+        category: insight.category,
+        title: insight.title,
+        explanation: insight.explanation,
+        recommendation: insight.recommendation,
+        affectedNodes: [],
+      });
+    }
+
+    grouped.get(key).affectedNodes.push({
+      nodeId: insight.nodeId,
+      nodeType: insight.nodeType,
+      timePercent: insight.timePercent || 0,
+    });
+  }
+
+  return Array.from(grouped.values()).sort((a, b) => {
+    const severityDiff = (severityRank[b.severity] || 0) - (severityRank[a.severity] || 0);
+    if (severityDiff !== 0) return severityDiff;
+    const peakA = a.affectedNodes.reduce((max, node) => Math.max(max, node.timePercent || 0), 0);
+    const peakB = b.affectedNodes.reduce((max, node) => Math.max(max, node.timePercent || 0), 0);
+    return peakB - peakA;
+  });
+}
+
+function generatePlanNarrative(root, summary, insights) {
+  const parts = [];
+  const bottleneck = summary.worstTimeShare;
+  const mismatch = summary.worstMismatch;
+  const highMismatch =
+    mismatch && Number.isFinite(mismatch.score) && mismatch.score > 10;
+  const hasNestedLoopExplosion = summary.maxJoinAmplification > 10;
+  const majorIssueCount = insights.filter((insight) => insight.severity === "high" || insight.severity === "medium").length;
+
+  parts.push(`This query scanned ${summary.relationCount} relation${summary.relationCount === 1 ? "" : "s"}.`);
+
+  if (bottleneck) {
+    parts.push(
+      `Most time (${formatNumber(bottleneck.derived.timePercent * 100)}%) was spent in ${bottleneck.nodeType}.`,
+    );
+  }
+
+  if (highMismatch && mismatch?.node) {
+    parts.push(
+      `A severe row estimate mismatch (${formatNumber(mismatch.score)}x) was observed in ${mismatch.node.nodeType}.`,
+    );
+  }
+
+  if (summary.hasSpill) {
+    parts.push("A spill to disk occurred, increasing I/O pressure.");
+  }
+
+  if (hasNestedLoopExplosion) {
+    parts.push(`Join amplification reached ${formatNumber(summary.maxJoinAmplification)}x, indicating potential join explosion.`);
+  }
+
+  parts.push(`${majorIssueCount} major issue${majorIssueCount === 1 ? "" : "s"} were flagged for optimization.`);
+
+  if (parts.length === 0) {
+    return "Execution plan completed with no major bottlenecks detected.";
+  }
+
+  return parts.join(" ");
+}
+
+function getOptimizationPriorityNode(root) {
+  const nodes = flattenTree(root);
+  let best = null;
+  let bestScore = -1;
+
+  for (const node of nodes) {
+    const rowEstimateError = getFoldedEstimateErrorFromRatio(node.derived.rowEstimateRatio);
+    const score =
+      (node.derived.timePercent || 0) *
+      Math.log10(rowEstimateError + 1) *
+      (node.derived.diskSpillDetected ? 1.5 : 1);
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = node;
+    }
+  }
+
+  return best;
+}
+
 function App() {
   const [input, setInput] = useState("");
+  const [beginnerMode, setBeginnerMode] = useState(true);
   const [tree, setTree] = useState(null);
   const [insights, setInsights] = useState([]);
   const [parseError, setParseError] = useState("");
@@ -251,10 +394,29 @@ function App() {
   const [showEstVsActual, setShowEstVsActual] = useState(true);
   const [treeRenderSeed, setTreeRenderSeed] = useState(0);
   const [defaultOpen, setDefaultOpen] = useState(true);
+  const [showAllBeginnerIssues, setShowAllBeginnerIssues] = useState(false);
   const [scrollToStatsPending, setScrollToStatsPending] = useState(false);
   const statsSectionRef = useRef(null);
+  const nodeRefs = useRef(new Map());
 
   const summary = useMemo(() => (tree ? buildSummary(tree) : null), [tree]);
+  const queryHealth = useMemo(
+    () => (summary ? computeQueryHealth(summary, insights) : null),
+    [summary, insights],
+  );
+  const groupedIssues = useMemo(() => groupIssuesForDisplay(insights), [insights]);
+  const visibleIssueGroups = useMemo(() => {
+    if (!beginnerMode) return groupedIssues;
+    return showAllBeginnerIssues ? groupedIssues : groupedIssues.slice(0, 3);
+  }, [groupedIssues, beginnerMode, showAllBeginnerIssues]);
+  const planNarrative = useMemo(
+    () => (tree && summary ? generatePlanNarrative(tree, summary, insights) : ""),
+    [tree, summary, insights],
+  );
+  const fixFirstNode = useMemo(
+    () => (tree ? getOptimizationPriorityNode(tree) : null),
+    [tree],
+  );
   const nodeTypeStats = useMemo(() => (tree ? buildNodeTypeStats(tree) : []), [tree]);
   const relationStats = useMemo(() => (tree ? buildRelationStats(tree) : []), [tree]);
   const insightsByNode = useMemo(() => {
@@ -272,6 +434,28 @@ function App() {
     setScrollToStatsPending(false);
   }, [scrollToStatsPending, tree]);
 
+  function registerNodeRef(nodeId, element) {
+    if (!nodeId) return;
+    if (!element) {
+      nodeRefs.current.delete(nodeId);
+      return;
+    }
+    nodeRefs.current.set(nodeId, element);
+  }
+
+  function scrollToNode(nodeId) {
+    const element = nodeRefs.current.get(nodeId);
+    if (!element) return;
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    element.classList.remove("node-flash");
+    // Force reflow so repeated clicks retrigger animation.
+    void element.offsetWidth;
+    element.classList.add("node-flash");
+    window.setTimeout(() => {
+      element.classList.remove("node-flash");
+    }, 2000);
+  }
+
   function analyze() {
     setParseError("");
     try {
@@ -285,6 +469,7 @@ function App() {
 
       setTree(canonical);
       setInsights(nextInsights);
+      setShowAllBeginnerIssues(false);
       setScrollToStatsPending(true);
     } catch (error) {
       setTree(null);
@@ -301,6 +486,21 @@ function App() {
           <div className="brand-line">
             <span className="brand-banner">Query Lab</span>
             <span className="brand-tagline">PostgreSQL plan insights</span>
+            <label className="mode-toggle" title="Toggle between beginner and advanced analysis views.">
+              <span className={`mode-label ${beginnerMode ? "active" : ""}`}>Basic</span>
+              <input
+                type="checkbox"
+                checked={!beginnerMode}
+                onChange={(event) => {
+                  const advancedEnabled = event.target.checked;
+                  setBeginnerMode(!advancedEnabled);
+                  setShowAllBeginnerIssues(false);
+                }}
+                aria-label="Toggle Beginner and Advanced mode"
+              />
+              <span className="mode-slider" />
+              <span className={`mode-label ${!beginnerMode ? "active" : ""}`}>Advanced</span>
+            </label>
           </div>
         </div>
       </header>
@@ -326,97 +526,58 @@ function App() {
 
       {tree && summary && (
         <>
-          <section ref={statsSectionRef} className="panel summary-grid">
-            <SummaryCard
-              title="Total Execution Time"
-              value={`${formatNumber(summary.totalExecutionTime)} ms`}
-              description="Total inclusive runtime for the entire plan tree."
-            />
-            <SummaryCard
-              title="Worst Self Time Node"
-              value={
-                summary.worstSelf
-                  ? `${summary.worstSelf.nodeType} (${formatNumber(summary.worstSelf.derived.selfTime)} ms)`
-                  : "N/A"
-              }
-              description="Operator spending the most exclusive (self) time."
-            />
-            <SummaryCard
-              title="Worst Estimate Mismatch"
-              value={
-                summary.worstMismatch
-                  ? `${summary.worstMismatch.node.nodeType} (${formatNumber(summary.worstMismatch.score)}x)`
-                  : "N/A"
-              }
-              description="Largest divergence between planner estimate and actual rows."
-            />
-            <SummaryCard
-              title="Total Disk Reads"
-              value={formatNumber(summary.totalDiskReads, 0)}
-              description="Total read blocks across shared/local/temp buffers."
-            />
-            <SummaryCard
-              title="Spill Indicator"
-              value={summary.hasSpill ? "Spill Detected" : "No Spill"}
-              description="Flags sort/temp disk spill activity in any node."
-            />
-            <SummaryCard
-              title="Join Amplification"
-              value={`${formatNumber(summary.maxJoinAmplification)}x max`}
-              description="Maximum child-row-to-output-row amplification among join nodes."
-            />
-            <SummaryCard
-              title="Shared Read Blocks"
-              value={formatNumber(summary.sharedReads, 0)}
-              description="Physical shared-buffer reads from storage."
-            />
-            <SummaryCard
-              title="Temp Written Blocks"
-              value={formatNumber(summary.tempWrites, 0)}
-              description="Temporary blocks written, usually from spills or hashing."
-            />
-            <SummaryCard
-              title="Plan Shape"
-              value={`${formatNumber(summary.totalNodes, 0)} nodes / ${formatNumber(summary.leafNodes, 0)} leaves`}
-              description="Operator count and leaf-node count in this execution tree."
-            />
-            <SummaryCard
-              title="Seq Scan Count"
-              value={formatNumber(summary.seqScanCount, 0)}
-              description="Number of sequential scan operators in the plan."
-            />
-            <SummaryCard
-              title="Hotspot Share"
-              value={
-                summary.worstTimeShare
-                  ? `${summary.worstTimeShare.nodeType} (${formatNumber(summary.worstTimeShare.derived.timePercent * 100)}%)`
-                  : "N/A"
-              }
-              description="Node consuming the highest share of total inclusive time."
-            />
-            <SummaryCard
-              title="Avg Estimate Error"
-              value={`${formatNumber(summary.avgEstimateError)}x`}
-              description="Average row estimate error factor across nodes."
-            />
-            <SummaryCard
-              title="Parallel Utilization"
-              value={`${formatNumber(summary.parallelUtilization * 100)}%`}
-              description="Total launched workers divided by total planned workers."
-            />
-            <SummaryCard
-              title="Total Rows Processed"
-              value={formatNumber(summary.totalRowsProcessed, 0)}
-              description="Sum of actual rows multiplied by loops across all plan nodes."
-            />
-            <SummaryCard
-              title="Row Throughput"
-              value={`${formatNumber(summary.rowThroughput, 0)} rows/s`}
-              description="Estimated processing speed based on rows processed over total execution time."
-            />
-          </section>
+          {beginnerMode && queryHealth && (
+            <section ref={statsSectionRef} className="panel">
+              <div className="summary-grid">
+                <SummaryCard
+                  title="Query Health"
+                  value={`${queryHealth.label} (${queryHealth.score}/100)`}
+                  description="Overall health grade inferred from plan warnings and runtime behavior."
+                />
+                <SummaryCard
+                  title="Plan Complexity"
+                  value={`${summary.complexityLabel} (${summary.complexityScore})`}
+                  description="Complexity score based on node count, join amplification, and sequential scans."
+                />
+              </div>
+              <div style={{ marginTop: 10, color: "var(--text-muted)", fontSize: 13 }}>{planNarrative}</div>
+              <div className="summary-grid" style={{ marginTop: 10 }}>
+                <SummaryCard
+                  title="Total Execution Time"
+                  value={`${formatNumber(summary.totalExecutionTime)} ms`}
+                  description="Total inclusive runtime for the entire plan tree."
+                />
+                <SummaryCard
+                  title="Top Bottleneck Operator"
+                  value={
+                    summary.worstTimeShare
+                      ? `${summary.worstTimeShare.nodeType} (${formatNumber(summary.worstTimeShare.derived.timePercent * 100)}%)`
+                      : "N/A"
+                  }
+                  description="Operator consuming the highest share of total runtime."
+                />
+                <SummaryCard
+                  title="Largest Estimate Mismatch"
+                  value={
+                    summary.worstMismatch && summary.worstMismatch.node.derived.timePercent > 0.1
+                      ? `${summary.worstMismatch.node.nodeType} (${formatNumber(summary.worstMismatch.score)}x)`
+                      : "No major mismatch"
+                  }
+                  description="Highest row estimate mismatch among impactful nodes (>10% time share)."
+                />
+                <SummaryCard
+                  title="Disk Spill Indicator"
+                  value={summary.hasSpill ? "Spill Detected" : "No Spill"}
+                  description="Indicates whether any operator spilled to disk."
+                />
+              </div>
+            </section>
+          )}
 
-          <section className="panel">
+          <section
+            className="panel"
+            style={{ marginTop: 18, marginBottom: 18 }}
+          >
             <div className="execution-header">
               <h2>Execution Tree</h2>
               <div className="execution-actions">
@@ -471,61 +632,225 @@ function App() {
               node={tree}
               rootMetricMax={Math.max(1, useSelfTime ? tree.derived.selfTime : tree.derived.effectiveTime)}
               defaultOpen={defaultOpen}
+              beginnerMode={beginnerMode}
               useSelfTime={useSelfTime}
               highlightMismatch={highlightMismatch}
               showEstVsActual={showEstVsActual}
               insightsByNode={insightsByNode}
+              fixFirstNodeId={fixFirstNode?.id || null}
+              registerNodeRef={registerNodeRef}
               renderSeed={treeRenderSeed}
             />
           </section>
 
-          <section className="panel panel-table">
-            <h2>Statistics by Node Type</h2>
-            <table className="stats-table">
-              <thead>
-                <tr>
-                  <th align="left">Node Type</th>
-                  <th align="left">Count</th>
-                  <th align="left">Exclusive Time</th>
-                  <th align="left">% of Query (exclusive)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {nodeTypeStats.map((row) => (
-                  <tr key={row.nodeType}>
-                    <td>{row.nodeType}</td>
-                    <td>{row.count}</td>
-                    <td>{formatMs(row.selfTime)}</td>
-                    <td>{formatNumber((row.selfTime / Math.max(1, summary.totalExecutionTime)) * 100)}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <section className="panel">
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <h2>Top Issues in This Plan</h2>
+              {beginnerMode && groupedIssues.length > 3 && (
+                <button
+                  type="button"
+                  className="node-action-btn"
+                  onClick={() => setShowAllBeginnerIssues((value) => !value)}
+                >
+                  {showAllBeginnerIssues ? "Show Top 3" : `Show All Issues (${groupedIssues.length})`}
+                </button>
+              )}
+            </div>
+            <div className="insight-list">
+              {visibleIssueGroups.map((group) => {
+                const peakTimePercent = group.affectedNodes.reduce(
+                  (max, node) => Math.max(max, node.timePercent || 0),
+                  0,
+                );
+                return (
+                  <article
+                    key={`${group.severity}-${group.category}-${group.title}-${group.explanation}-${group.recommendation}`}
+                    className="insight issue-group-card"
+                    style={{
+                      background: "var(--surface-soft, #f8fafc)",
+                      borderLeft: `4px solid ${severityBorderColor[group.severity] || "#7587a5"}`,
+                    }}
+                  >
+                    <div className="insight-header">
+                      <span className={`badge badge-${group.severity}`}>{group.severity.toUpperCase()}</span>
+                      <h3>{group.title}</h3>
+                      <span className="category">({group.affectedNodes.length} nodes affected)</span>
+                    </div>
+                    <p><strong>Peak Time %:</strong> {formatNumber(peakTimePercent * 100)}% <span className="category">| Category: {group.category}</span></p>
+                    <p>{String(group.explanation || "").split(".")[0]}.</p>
+                    <p>
+                      <strong>Recommendation:</strong> {group.recommendation}
+                    </p>
+                    <details className="issue-affected-details">
+                      <summary>View affected nodes</summary>
+                      <div className="issue-node-chips">
+                        {group.affectedNodes.map((node, index) => (
+                          <button
+                            key={`${group.title}-${node.nodeId}-${index}`}
+                            type="button"
+                            className="issue-node-chip"
+                            onClick={() => scrollToNode(node.nodeId)}
+                          >
+                            {node.nodeType} ({formatNumber((node.timePercent || 0) * 100)}%)
+                          </button>
+                        ))}
+                      </div>
+                    </details>
+                  </article>
+                );
+              })}
+              {visibleIssueGroups.length === 0 && <div className="empty">No major issues detected.</div>}
+            </div>
           </section>
 
-          <section className="panel panel-table">
-            <h2>Statistics by Relation</h2>
-            <table className="stats-table">
-              <thead>
-                <tr>
-                  <th align="left">Relation</th>
-                  <th align="left">Scan Count</th>
-                  <th align="left">Total Exclusive Time</th>
-                  <th align="left">Node Types</th>
-                </tr>
-              </thead>
-              <tbody>
-                {relationStats.map((row) => (
-                  <tr key={row.relationName}>
-                    <td>{row.relationName}</td>
-                    <td>{row.scanCount}</td>
-                    <td>{formatMs(row.totalTime)}</td>
-                    <td>{row.nodeTypes.join(", ")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
+          {!beginnerMode && (
+            <>
+              <section ref={statsSectionRef} className="panel summary-grid">
+                <SummaryCard
+                  title="Total Execution Time"
+                  value={`${formatNumber(summary.totalExecutionTime)} ms`}
+                  description="Total inclusive runtime for the entire plan tree."
+                />
+                <SummaryCard
+                  title="Worst Self Time Node"
+                  value={
+                    summary.worstSelf
+                      ? `${summary.worstSelf.nodeType} (${formatNumber(summary.worstSelf.derived.selfTime)} ms)`
+                      : "N/A"
+                  }
+                  description="Operator spending the most exclusive (self) time."
+                />
+                <SummaryCard
+                  title="Worst Estimate Mismatch"
+                  value={
+                    summary.worstMismatch
+                      ? `${summary.worstMismatch.node.nodeType} (${formatNumber(summary.worstMismatch.score)}x)`
+                      : "N/A"
+                  }
+                  description="Largest divergence between planner estimate and actual rows."
+                />
+                <SummaryCard
+                  title="Total Disk Reads"
+                  value={formatNumber(summary.totalDiskReads, 0)}
+                  description="Total read blocks across shared/local/temp buffers."
+                />
+                <SummaryCard
+                  title="Spill Indicator"
+                  value={summary.hasSpill ? "Spill Detected" : "No Spill"}
+                  description="Flags sort/temp disk spill activity in any node."
+                />
+                <SummaryCard
+                  title="Join Amplification"
+                  value={`${formatNumber(summary.maxJoinAmplification)}x max`}
+                  description="Maximum child-row-to-output-row amplification among join nodes."
+                />
+                <SummaryCard
+                  title="Shared Read Blocks"
+                  value={formatNumber(summary.sharedReads, 0)}
+                  description="Physical shared-buffer reads from storage."
+                />
+                <SummaryCard
+                  title="Temp Written Blocks"
+                  value={formatNumber(summary.tempWrites, 0)}
+                  description="Temporary blocks written, usually from spills or hashing."
+                />
+                <SummaryCard
+                  title="Plan Shape"
+                  value={`${formatNumber(summary.totalNodes, 0)} nodes / ${formatNumber(summary.leafNodes, 0)} leaves`}
+                  description="Operator count and leaf-node count in this execution tree."
+                />
+                <SummaryCard
+                  title="Seq Scan Count"
+                  value={formatNumber(summary.seqScanCount, 0)}
+                  description="Number of sequential scan operators in the plan."
+                />
+                <SummaryCard
+                  title="Hotspot Share"
+                  value={
+                    summary.worstTimeShare
+                      ? `${summary.worstTimeShare.nodeType} (${formatNumber(summary.worstTimeShare.derived.timePercent * 100)}%)`
+                      : "N/A"
+                  }
+                  description="Node consuming the highest share of total inclusive time."
+                />
+                <SummaryCard
+                  title="Avg Estimate Error"
+                  value={`${formatNumber(summary.avgEstimateError)}x`}
+                  description="Average row estimate error factor across nodes."
+                />
+                <SummaryCard
+                  title="Parallel Utilization"
+                  value={`${formatNumber(summary.parallelUtilization * 100)}%`}
+                  description="Total launched workers divided by total planned workers."
+                />
+                <SummaryCard
+                  title="Total Rows Processed"
+                  value={formatNumber(summary.totalRowsProcessed, 0)}
+                  description="Sum of actual rows multiplied by loops across all plan nodes."
+                />
+                <SummaryCard
+                  title="Row Throughput"
+                  value={`${formatNumber(summary.rowThroughput, 0)} rows/s`}
+                  description="Estimated processing speed based on rows processed over total execution time."
+                />
+              </section>
+
+              <section className="panel panel-table">
+                <h2>Statistics by Node Type</h2>
+                <table className="stats-table">
+                  <thead>
+                    <tr>
+                      <th align="left">Node Type</th>
+                      <th align="left">Count</th>
+                      <th align="left">Exclusive Time</th>
+                      <th align="left">% of Query (exclusive)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {nodeTypeStats.map((row) => (
+                      <tr key={row.nodeType}>
+                        <td>{row.nodeType}</td>
+                        <td>{row.count}</td>
+                        <td>{formatMs(row.selfTime)}</td>
+                        <td>{formatNumber((row.selfTime / Math.max(1, summary.totalExecutionTime)) * 100)}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+
+              <section className="panel panel-table">
+                <h2>Statistics by Relation</h2>
+                <table className="stats-table">
+                  <thead>
+                    <tr>
+                      <th align="left">Relation</th>
+                      <th align="left">Scan Count</th>
+                      <th align="left">Total Exclusive Time</th>
+                      <th align="left">Node Types</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {relationStats.map((row) => (
+                      <tr key={row.relationName}>
+                        <td>{row.relationName}</td>
+                        <td>{row.scanCount}</td>
+                        <td>{formatMs(row.totalTime)}</td>
+                        <td>{row.nodeTypes.join(", ")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+            </>
+          )}
         </>
       )}
     </div>
@@ -550,10 +875,13 @@ function TreeNode({
   node,
   rootMetricMax,
   defaultOpen,
+  beginnerMode,
   useSelfTime,
   highlightMismatch,
   showEstVsActual,
   insightsByNode,
+  fixFirstNodeId,
+  registerNodeRef,
   renderSeed,
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -588,6 +916,8 @@ function TreeNode({
       value: `${formatNumber(node.workers.launched, 0)} / ${formatNumber(node.workers.planned, 0)}`,
     },
   ];
+  const beginnerEstimateError = getFoldedEstimateErrorFromRatio(rowRatio);
+  const simplifiedBeginnerView = beginnerMode && !showDetails;
 
   const tooltip =
     `actual rows: ${formatNumber(node.actual.rows, 0)}\n` +
@@ -598,7 +928,7 @@ function TreeNode({
     `effective time: ${formatNumber(node.derived.effectiveTime)} ms`;
 
   return (
-    <div className="tree-node">
+    <div className="tree-node" ref={(el) => registerNodeRef(node.id, el)}>
       <div
         className={[
           "tree-row",
@@ -616,6 +946,11 @@ function TreeNode({
             <strong>{node.nodeType}</strong>
             {node.relationName && <span> on {node.relationName}</span>}
             {node.indexName && <span> using {node.indexName}</span>}
+            {node.id === fixFirstNodeId && (
+              <span className="badge badge-medium" title="This node has the highest optimization impact score.">
+                Highest Optimization Impact
+              </span>
+            )}
             {severity && <span className={`badge badge-${severity}`}>{severity.toUpperCase()}</span>}
             <button
               type="button"
@@ -625,7 +960,7 @@ function TreeNode({
             >
               {showDetails ? "Hide Details" : "Details"}
             </button>
-            {nodeInsights.length > 0 && (
+            {nodeInsights.length > 0 && (!beginnerMode || showDetails) && (
               <button
                 type="button"
                 onClick={() => setShowInsights((value) => !value)}
@@ -636,12 +971,17 @@ function TreeNode({
               </button>
             )}
           </div>
-          {showEstVsActual && (
+          {simplifiedBeginnerView ? (
+            <div className="node-metrics">
+              time {formatNumber(node.derived.timePercent * 100)}% | estimate error {formatNumber(beginnerEstimateError)}x
+              {node.derived.diskSpillDetected ? " | spill detected" : ""}
+            </div>
+          ) : showEstVsActual ? (
             <div className="node-metrics">
               est rows {formatNumber(node.estimatedRows, 0)} | actual rows {formatNumber(node.actual.rows, 0)} | loops{" "}
               {formatNumber(node.actual.loops, 0)} | row ratio {formatNumber(rowRatio)}
             </div>
-          )}
+          ) : null}
         </div>
         <div className="metric">
           {formatNumber(metricValue)} ms
@@ -697,7 +1037,7 @@ function TreeNode({
         </div>
       )}
 
-      {showInsights && nodeInsights.length > 0 && (
+      {showInsights && nodeInsights.length > 0 && (!beginnerMode || showDetails) && (
         <div className="insight-list node-insights-list">
           {nodeInsights.map((insight, index) => (
             <article key={`${insight.nodeId}-${index}`} className={`insight insight-${insight.severity}`}>
@@ -728,6 +1068,9 @@ function TreeNode({
               highlightMismatch={highlightMismatch}
               showEstVsActual={showEstVsActual}
               insightsByNode={insightsByNode}
+              beginnerMode={beginnerMode}
+              fixFirstNodeId={fixFirstNodeId}
+              registerNodeRef={registerNodeRef}
               renderSeed={renderSeed}
             />
           ))}

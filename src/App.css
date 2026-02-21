@@ -100,6 +100,71 @@ body {
   gap: 10px;
 }
 
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  user-select: none;
+}
+
+.mode-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.mode-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  transition: color 0.2s ease;
+}
+
+.mode-label.active {
+  color: var(--text);
+}
+
+.mode-slider {
+  width: 38px;
+  height: 20px;
+  border-radius: 999px;
+  position: relative;
+  background: color-mix(in srgb, var(--brand-soft) 66%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--border));
+  transition: background 0.25s ease, border-color 0.25s ease;
+}
+
+.mode-slider::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.25s ease;
+}
+
+.mode-toggle input:checked + .mode-slider {
+  background: color-mix(in srgb, var(--brand) 84%, #fff 16%);
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--border));
+}
+
+.mode-toggle input:checked + .mode-slider::after {
+  transform: translateX(18px);
+}
+
 .brand-tagline {
   font-size: 13px;
   font-weight: 600;
@@ -347,6 +412,43 @@ button:disabled {
   line-height: 1.4;
 }
 
+.issue-group-card {
+  background: var(--surface-soft);
+}
+
+.issue-affected-details {
+  margin-top: 8px;
+}
+
+.issue-affected-details summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.issue-node-chips {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.issue-node-chip {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.issue-node-chip:hover {
+  border-color: var(--brand);
+  color: var(--brand-strong);
+}
+
 .insight-high {
   border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
   background: color-mix(in srgb, var(--danger-soft) 62%, var(--surface-soft));
@@ -489,6 +591,19 @@ button:disabled {
 
 .children {
   margin-left: 22px;
+}
+
+.node-flash {
+  animation: flashHighlight 2s ease;
+}
+
+@keyframes flashHighlight {
+  0% {
+    background-color: rgba(255, 230, 150, 0.8);
+  }
+  100% {
+    background-color: transparent;
+  }
 }
 
 .execution-header {
