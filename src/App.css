@@ -191,6 +191,57 @@ body {
   box-shadow: var(--shadow-soft);
 }
 
+.section-card {
+  background: #ffffff;
+  border-radius: 12px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.section-header {
+  /* background: #effaff; */
+  background: #fff;
+  padding: 16px 18px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  user-select: none;
+  transition: background 0.2s ease;
+}
+
+.section-header:hover {
+  background: #f5f5f5;
+}
+
+.section-header.expanded {
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.section-body {
+  padding: 16px;
+}
+
+.first-accordion {
+  margin-top: 24px;
+}
+
+.section-major {
+  margin-top: 20px;
+}
+
+.chevron {
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+
+.chevron.rotated {
+  transform: rotate(90deg);
+}
+
 .panel h2 {
   margin: 0 0 12px;
   font-size: 20px;
@@ -232,27 +283,14 @@ input:focus {
 .input-panel-header {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 10px;
-  margin-bottom: 10px;
-}
-
-.input-panel-header h2 {
-  margin: 0;
-  font-size: 18px;
+  margin-bottom: 8px;
 }
 
 .input-panel-header span {
   color: var(--text-muted);
   font-size: 12px;
-}
-
-.input-editor-wrap {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  padding: 10px;
-  box-shadow: var(--shadow-soft);
 }
 
 button {
@@ -385,7 +423,7 @@ button:disabled {
 
 .insight-list {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .insight {
@@ -412,41 +450,129 @@ button:disabled {
   line-height: 1.4;
 }
 
-.issue-group-card {
-  background: var(--surface-soft);
+.issue-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 10px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+  border: 1px solid var(--border);
+  transition: all 0.2s ease;
 }
 
-.issue-affected-details {
-  margin-top: 8px;
+.issue-card:hover,
+.issue-card:hover {
+  transform: translateY(-1px);
 }
 
-.issue-affected-details summary {
-  cursor: pointer;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.issue-node-chips {
-  margin-top: 8px;
+.issue-card .issue-header {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
-.issue-node-chip {
-  border: 1px solid var(--border-strong);
-  background: var(--surface);
-  color: var(--text);
-  border-radius: var(--radius-sm);
-  padding: 5px 8px;
+.issue-header-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.issue-header-main h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.issue-meta {
+  font-size: 13px;
+  color: #6b7280;
+  text-align: right;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.issue-summary {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.insight-expand-btn {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--brand);
   font-size: 12px;
   font-weight: 600;
   box-shadow: none;
 }
 
-.issue-node-chip:hover {
-  border-color: var(--brand);
-  color: var(--brand-strong);
+.issue-expanded {
+  margin-top: 8px;
+}
+
+.issue-recommendation {
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.insight-recommendation {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.insight-affected-title {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.issue-node-chips {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.node-pill {
+  display: inline-block;
+  padding: 6px 10px;
+  margin: 0;
+  border-radius: 999px;
+  background: #f3f4f6;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid var(--border);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.node-pill:hover {
+  background: #e5e7eb;
+  transform: translateY(-1px);
+}
+
+.issue-card.severity-high {
+  border-left: 3px solid #dc2626;
+}
+
+.issue-card.severity-medium {
+  border-left: 3px solid #d97706;
+}
+
+.issue-card.severity-low {
+  border-left: 3px solid #2563eb;
 }
 
 .insight-high {
@@ -624,6 +750,26 @@ button:disabled {
   gap: 8px;
 }
 
+.tree-actions button {
+  background: transparent;
+  border: 1px solid #e5e7eb;
+  color: #374151;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+  box-shadow: none;
+}
+
+.tree-actions button:hover {
+  background: #f3f4f6;
+  filter: none;
+}
+
+.show-issues-btn {
+  margin-bottom: 16px;
+}
+
 .execution-controls {
   display: flex;
   gap: 14px;
@@ -717,6 +863,79 @@ button:disabled {
 .node-insights-list {
   margin-left: 34px;
   margin-top: 8px;
+}
+
+.node-insight-card {
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 8px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+  transition: all 0.2s ease;
+  border: 1px solid var(--border);
+}
+
+.node-insight-card:hover {
+  transform: translateY(-1px);
+}
+
+.node-insight-card.severity-high {
+  border-left: 3px solid #dc2626;
+}
+
+.node-insight-card.severity-medium {
+  border-left: 3px solid #d97706;
+}
+
+.node-insight-card.severity-low {
+  border-left: 3px solid #2563eb;
+}
+
+.node-insight-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.node-insight-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.node-insight-title h3 {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.node-insight-meta {
+  font-size: 12px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.node-insight-summary {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.node-insight-expanded {
+  margin-top: 8px;
+}
+
+.node-insight-recommendation {
+  margin: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .empty {

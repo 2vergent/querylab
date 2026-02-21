@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import parseInput from "./parser";
 import canonicalize from "./canonicalize";
 import statsEngine from "./statsEngine";
@@ -10,12 +10,6 @@ const severityRank = {
   medium: 2,
   low: 1,
 };
-const severityBorderColor = {
-  high: "#d43c4c",
-  medium: "#cc8a1d",
-  low: "#3f6fd8",
-};
-
 function getFoldedEstimateErrorFromRatio(ratio) {
   if (!Number.isFinite(ratio) || ratio <= 0) return Number.POSITIVE_INFINITY;
   return Math.max(ratio, 1 / ratio);
@@ -395,8 +389,14 @@ function App() {
   const [treeRenderSeed, setTreeRenderSeed] = useState(0);
   const [defaultOpen, setDefaultOpen] = useState(true);
   const [showAllBeginnerIssues, setShowAllBeginnerIssues] = useState(false);
-  const [scrollToStatsPending, setScrollToStatsPending] = useState(false);
-  const statsSectionRef = useRef(null);
+  const [expandedIssueId, setExpandedIssueId] = useState(null);
+  const [inputCollapsed, setInputCollapsed] = useState(false);
+  const [executionTreeCollapsed, setExecutionTreeCollapsed] = useState(false);
+  const [topIssuesCollapsed, setTopIssuesCollapsed] = useState(false);
+  const [nodeTypeStatsCollapsed, setNodeTypeStatsCollapsed] = useState(false);
+  const [relationStatsCollapsed, setRelationStatsCollapsed] = useState(false);
+  const statsRef = useRef(null);
+  const executionTreeRef = useRef(null);
   const nodeRefs = useRef(new Map());
 
   const summary = useMemo(() => (tree ? buildSummary(tree) : null), [tree]);
@@ -427,12 +427,6 @@ function App() {
     }
     return map;
   }, [insights]);
-
-  useEffect(() => {
-    if (!scrollToStatsPending || !tree || !statsSectionRef.current) return;
-    statsSectionRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
-    setScrollToStatsPending(false);
-  }, [scrollToStatsPending, tree]);
 
   function registerNodeRef(nodeId, element) {
     if (!nodeId) return;
@@ -470,12 +464,19 @@ function App() {
       setTree(canonical);
       setInsights(nextInsights);
       setShowAllBeginnerIssues(false);
-      setScrollToStatsPending(true);
+      setExpandedIssueId(null);
+      setInputCollapsed(true);
+      setTimeout(() => {
+        if (beginnerMode) {
+          statsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        } else {
+          executionTreeRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 100);
     } catch (error) {
       setTree(null);
       setInsights([]);
       setParseError(error.message || "Unable to parse plan.");
-      setScrollToStatsPending(false);
     }
   }
 
@@ -495,6 +496,7 @@ function App() {
                   const advancedEnabled = event.target.checked;
                   setBeginnerMode(!advancedEnabled);
                   setShowAllBeginnerIssues(false);
+                  setExpandedIssueId(null);
                 }}
                 aria-label="Toggle Beginner and Advanced mode"
               />
@@ -505,29 +507,42 @@ function App() {
         </div>
       </header>
 
-      <section className="panel input-panel">
-        <div className="input-panel-header">
-          <h2>Plan Input</h2>
-          <span>Paste `EXPLAIN ANALYZE` output (JSON or text)</span>
+      <section className="section-card first-accordion">
+        <div
+          className={`section-header ${!inputCollapsed ? "expanded" : ""}`}
+          onClick={() => setInputCollapsed((value) => !value)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              setInputCollapsed((value) => !value);
+            }
+          }}
+        >
+          <span>Plan Input</span>
+          <span className={`chevron ${!inputCollapsed ? "rotated" : ""}`}>▸</span>
         </div>
-        <div className="input-editor-wrap">
-        <textarea
-          rows={12}
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          placeholder="Paste EXPLAIN ANALYZE output (JSON or text)..."
-        />
-        </div>
-        <div className="input-actions">
-          <button onClick={analyze}>Analyze Plan</button>
-        </div>
-        {parseError && <div className="error-banner">{parseError}</div>}
+        {!inputCollapsed && (
+          <div className="section-body input-panel">
+            <textarea
+              rows={12}
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder="Paste EXPLAIN ANALYZE output (JSON or text)..."
+            />
+            <div className="input-actions">
+              <button onClick={analyze}>Analyze Plan</button>
+            </div>
+            {parseError && <div className="error-banner">{parseError}</div>}
+          </div>
+        )}
       </section>
 
       {tree && summary && (
         <>
           {beginnerMode && queryHealth && (
-            <section ref={statsSectionRef} className="panel">
+            <section ref={statsRef} className="panel section-major">
               <div className="summary-grid">
                 <SummaryCard
                   title="Query Health"
@@ -574,145 +589,188 @@ function App() {
             </section>
           )}
 
-          <section
-            className="panel"
-            style={{ marginTop: 18, marginBottom: 18 }}
-          >
-            <div className="execution-header">
-              <h2>Execution Tree</h2>
-              <div className="execution-actions">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDefaultOpen(true);
-                    setTreeRenderSeed((value) => value + 1);
-                  }}
-                >
-                  Expand All
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDefaultOpen(false);
-                    setTreeRenderSeed((value) => value + 1);
-                  }}
-                >
-                  Collapse All
-                </button>
-              </div>
-            </div>
-            <div className="execution-controls">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={useSelfTime}
-                  onChange={(event) => setUseSelfTime(event.target.checked)}
-                />
-                Show self time instead of total time
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={highlightMismatch}
-                  onChange={(event) => setHighlightMismatch(event.target.checked)}
-                />
-                Highlight row estimate mismatch
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={showEstVsActual}
-                  onChange={(event) => setShowEstVsActual(event.target.checked)}
-                />
-                Show estimated vs actual
-              </label>
-            </div>
-            <TreeNode
-              key={`${tree.id}-${treeRenderSeed}`}
-              node={tree}
-              rootMetricMax={Math.max(1, useSelfTime ? tree.derived.selfTime : tree.derived.effectiveTime)}
-              defaultOpen={defaultOpen}
-              beginnerMode={beginnerMode}
-              useSelfTime={useSelfTime}
-              highlightMismatch={highlightMismatch}
-              showEstVsActual={showEstVsActual}
-              insightsByNode={insightsByNode}
-              fixFirstNodeId={fixFirstNode?.id || null}
-              registerNodeRef={registerNodeRef}
-              renderSeed={treeRenderSeed}
-            />
-          </section>
-
-          <section className="panel">
+          <section ref={executionTreeRef} className="section-card section-major">
             <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 12,
+              className={`section-header ${!executionTreeCollapsed ? "expanded" : ""}`}
+              onClick={() => setExecutionTreeCollapsed((value) => !value)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setExecutionTreeCollapsed((value) => !value);
+                }
               }}
             >
-              <h2>Top Issues in This Plan</h2>
-              {beginnerMode && groupedIssues.length > 3 && (
-                <button
-                  type="button"
-                  className="node-action-btn"
-                  onClick={() => setShowAllBeginnerIssues((value) => !value)}
-                >
-                  {showAllBeginnerIssues ? "Show Top 3" : `Show All Issues (${groupedIssues.length})`}
-                </button>
-              )}
+              <span>Execution Tree</span>
+              <span className={`chevron ${!executionTreeCollapsed ? "rotated" : ""}`}>▸</span>
             </div>
-            <div className="insight-list">
+            {!executionTreeCollapsed && (
+              <div className="section-body">
+                <div className="execution-header">
+                  <div className="execution-actions tree-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDefaultOpen(true);
+                        setTreeRenderSeed((value) => value + 1);
+                      }}
+                    >
+                      Expand All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDefaultOpen(false);
+                        setTreeRenderSeed((value) => value + 1);
+                      }}
+                    >
+                      Collapse All
+                    </button>
+                  </div>
+                </div>
+                <div className="execution-controls">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={useSelfTime}
+                      onChange={(event) => setUseSelfTime(event.target.checked)}
+                    />
+                    Show self time instead of total time
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={highlightMismatch}
+                      onChange={(event) => setHighlightMismatch(event.target.checked)}
+                    />
+                    Highlight row estimate mismatch
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={showEstVsActual}
+                      onChange={(event) => setShowEstVsActual(event.target.checked)}
+                    />
+                    Show estimated vs actual
+                  </label>
+                </div>
+                <TreeNode
+                  key={`${tree.id}-${treeRenderSeed}`}
+                  node={tree}
+                  rootMetricMax={Math.max(1, useSelfTime ? tree.derived.selfTime : tree.derived.effectiveTime)}
+                  defaultOpen={defaultOpen}
+                  beginnerMode={beginnerMode}
+                  useSelfTime={useSelfTime}
+                  highlightMismatch={highlightMismatch}
+                  showEstVsActual={showEstVsActual}
+                  insightsByNode={insightsByNode}
+                  fixFirstNodeId={fixFirstNode?.id || null}
+                  registerNodeRef={registerNodeRef}
+                  renderSeed={treeRenderSeed}
+                />
+              </div>
+            )}
+          </section>
+
+          <section className="section-card section-major">
+            <div
+              className={`section-header ${!topIssuesCollapsed ? "expanded" : ""}`}
+              onClick={() => setTopIssuesCollapsed((value) => !value)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setTopIssuesCollapsed((value) => !value);
+                }
+              }}
+            >
+              <span>Top Issues in This Plan</span>
+              <span className={`chevron ${!topIssuesCollapsed ? "rotated" : ""}`}>▸</span>
+            </div>
+            {!topIssuesCollapsed && (
+              <div className="section-body">
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                  }}
+                >
+                  {beginnerMode && groupedIssues.length > 3 && (
+                    <button
+                      type="button"
+                      className="node-action-btn show-issues-btn"
+                      onClick={() => setShowAllBeginnerIssues((value) => !value)}
+                    >
+                      {showAllBeginnerIssues ? "Show Top 3" : `Show All Issues (${groupedIssues.length})`}
+                    </button>
+                  )}
+                </div>
+                <div className="insight-list">
               {visibleIssueGroups.map((group) => {
                 const peakTimePercent = group.affectedNodes.reduce(
                   (max, node) => Math.max(max, node.timePercent || 0),
                   0,
                 );
+                const issueKey = `${group.severity}-${group.category}-${group.title}-${group.explanation}-${group.recommendation}`;
+                const isExpanded = expandedIssueId === issueKey;
+                const shortExplanation = `${String(group.explanation || "").split(".")[0]}.`;
                 return (
-                  <article
-                    key={`${group.severity}-${group.category}-${group.title}-${group.explanation}-${group.recommendation}`}
-                    className="insight issue-group-card"
-                    style={{
-                      background: "var(--surface-soft, #f8fafc)",
-                      borderLeft: `4px solid ${severityBorderColor[group.severity] || "#7587a5"}`,
-                    }}
-                  >
-                    <div className="insight-header">
-                      <span className={`badge badge-${group.severity}`}>{group.severity.toUpperCase()}</span>
-                      <h3>{group.title}</h3>
-                      <span className="category">({group.affectedNodes.length} nodes affected)</span>
-                    </div>
-                    <p><strong>Peak Time %:</strong> {formatNumber(peakTimePercent * 100)}% <span className="category">| Category: {group.category}</span></p>
-                    <p>{String(group.explanation || "").split(".")[0]}.</p>
-                    <p>
-                      <strong>Recommendation:</strong> {group.recommendation}
-                    </p>
-                    <details className="issue-affected-details">
-                      <summary>View affected nodes</summary>
-                      <div className="issue-node-chips">
-                        {group.affectedNodes.map((node, index) => (
-                          <button
-                            key={`${group.title}-${node.nodeId}-${index}`}
-                            type="button"
-                            className="issue-node-chip"
-                            onClick={() => scrollToNode(node.nodeId)}
-                          >
-                            {node.nodeType} ({formatNumber((node.timePercent || 0) * 100)}%)
-                          </button>
-                        ))}
+                      <article key={issueKey} className={`issue-card severity-${group.severity}`}>
+                        <div className="issue-header">
+                          <div className="issue-header-main">
+                            <span className={`badge badge-${group.severity}`}>{group.severity.toUpperCase()}</span>
+                            <h3>{group.title}</h3>
+                          </div>
+                          <div className="issue-meta">
+                            {formatNumber(peakTimePercent * 100)}% impact • {group.affectedNodes.length} nodes
+                          </div>
+                        </div>
+                        <p className="issue-summary">{isExpanded ? group.explanation : shortExplanation}</p>
+                        <button
+                          type="button"
+                          className="insight-expand-btn"
+                      onClick={() => setExpandedIssueId((value) => (value === issueKey ? null : issueKey))}
+                        >
+                          {isExpanded ? "Hide details" : "View details"}
+                        </button>
+                        {isExpanded && (
+                          <div className="issue-expanded">
+                            <div className="issue-recommendation">
+                              <p className="insight-recommendation">
+                                <strong>Recommendation:</strong> {group.recommendation}
+                              </p>
+                            </div>
+                            <div className="insight-affected-title">Affected nodes</div>
+                            <div className="issue-node-chips">
+                              {group.affectedNodes.map((node, index) => (
+                                <button
+                              key={`${group.title}-${node.nodeId}-${index}`}
+                              type="button"
+                              className="node-pill"
+                              onClick={() => scrollToNode(node.nodeId)}
+                            >
+                              {node.nodeType} ({formatNumber((node.timePercent || 0) * 100)}%)
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                    </details>
+                    )}
                   </article>
                 );
               })}
               {visibleIssueGroups.length === 0 && <div className="empty">No major issues detected.</div>}
-            </div>
+                </div>
+              </div>
+            )}
           </section>
 
           {!beginnerMode && (
             <>
-              <section ref={statsSectionRef} className="panel summary-grid">
+              <section ref={statsRef} className="panel summary-grid section-major">
                 <SummaryCard
                   title="Total Execution Time"
                   value={`${formatNumber(summary.totalExecutionTime)} ms`}
@@ -802,52 +860,93 @@ function App() {
                 />
               </section>
 
-              <section className="panel panel-table">
-                <h2>Statistics by Node Type</h2>
-                <table className="stats-table">
-                  <thead>
-                    <tr>
-                      <th align="left">Node Type</th>
-                      <th align="left">Count</th>
-                      <th align="left">Exclusive Time</th>
-                      <th align="left">% of Query (exclusive)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {nodeTypeStats.map((row) => (
-                      <tr key={row.nodeType}>
-                        <td>{row.nodeType}</td>
-                        <td>{row.count}</td>
-                        <td>{formatMs(row.selfTime)}</td>
-                        <td>{formatNumber((row.selfTime / Math.max(1, summary.totalExecutionTime)) * 100)}%</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <section className="section-card section-major">
+                <div
+                  className={`section-header ${!nodeTypeStatsCollapsed ? "expanded" : ""}`}
+                  onClick={() => setNodeTypeStatsCollapsed((value) => !value)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setNodeTypeStatsCollapsed((value) => !value);
+                    }
+                  }}
+                >
+                  <span>Statistics by Node Type</span>
+                  <span className={`chevron ${!nodeTypeStatsCollapsed ? "rotated" : ""}`}>▸</span>
+                </div>
+                {!nodeTypeStatsCollapsed && (
+                  <div className="section-body panel-table">
+                    <table className="stats-table">
+                      <thead>
+                        <tr>
+                          <th align="left">Node Type</th>
+                          <th align="left">Count</th>
+                          <th align="left">Exclusive Time</th>
+                          <th align="left">% of Query (exclusive)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {nodeTypeStats.map((row) => {
+                          const percent = (row.selfTime / Math.max(1, summary.totalExecutionTime)) * 100;
+                          return (
+                            <tr key={row.nodeType}>
+                              <td>{row.nodeType}</td>
+                              <td>{row.count}</td>
+                              <td>{formatMs(row.selfTime)}</td>
+                              <td title="Can exceed 100% due to loop amplification and cumulative work.">
+                                {formatNumber(percent)}%
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </section>
 
-              <section className="panel panel-table">
-                <h2>Statistics by Relation</h2>
-                <table className="stats-table">
-                  <thead>
-                    <tr>
-                      <th align="left">Relation</th>
-                      <th align="left">Scan Count</th>
-                      <th align="left">Total Exclusive Time</th>
-                      <th align="left">Node Types</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {relationStats.map((row) => (
-                      <tr key={row.relationName}>
-                        <td>{row.relationName}</td>
-                        <td>{row.scanCount}</td>
-                        <td>{formatMs(row.totalTime)}</td>
-                        <td>{row.nodeTypes.join(", ")}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <section className="section-card section-major">
+                <div
+                  className={`section-header ${!relationStatsCollapsed ? "expanded" : ""}`}
+                  onClick={() => setRelationStatsCollapsed((value) => !value)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setRelationStatsCollapsed((value) => !value);
+                    }
+                  }}
+                >
+                  <span>Statistics by Relation</span>
+                  <span className={`chevron ${!relationStatsCollapsed ? "rotated" : ""}`}>▸</span>
+                </div>
+                {!relationStatsCollapsed && (
+                  <div className="section-body panel-table">
+                    <table className="stats-table">
+                      <thead>
+                        <tr>
+                          <th align="left">Relation</th>
+                          <th align="left">Scan Count</th>
+                          <th align="left">Total Exclusive Time</th>
+                          <th align="left">Node Types</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {relationStats.map((row) => (
+                          <tr key={row.relationName}>
+                            <td>{row.relationName}</td>
+                            <td>{row.scanCount}</td>
+                            <td>{formatMs(row.totalTime)}</td>
+                            <td>{row.nodeTypes.join(", ")}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </section>
             </>
           )}
@@ -887,6 +986,7 @@ function TreeNode({
   const [open, setOpen] = useState(defaultOpen);
   const [showInsights, setShowInsights] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
+  const [expandedNodeInsightId, setExpandedNodeInsightId] = useState(null);
 
   const metricValue = useSelfTime ? node.derived.selfTime : node.derived.effectiveTime;
   const ratio = Math.min(1, metricValue / Math.max(1, rootMetricMax));
@@ -1040,17 +1140,36 @@ function TreeNode({
       {showInsights && nodeInsights.length > 0 && (!beginnerMode || showDetails) && (
         <div className="insight-list node-insights-list">
           {nodeInsights.map((insight, index) => (
-            <article key={`${insight.nodeId}-${index}`} className={`insight insight-${insight.severity}`}>
-              <div className="insight-header">
-                <span className={`badge badge-${insight.severity}`}>{insight.severity.toUpperCase()}</span>
-                <span className="category">{insight.category}</span>
-                <h3>{insight.title}</h3>
+            <article key={`${insight.nodeId}-${index}`} className={`node-insight-card severity-${insight.severity}`}>
+              <div className="node-insight-header">
+                <div className="node-insight-title">
+                  <span className={`badge badge-${insight.severity}`}>{insight.severity.toUpperCase()}</span>
+                  <h3>{insight.title}</h3>
+                </div>
+                <div className="node-insight-meta">
+                  {formatNumber((insight.timePercent || 0) * 100)}% impact
+                </div>
               </div>
-              <p title="What this means for the execution behavior of this node.">{insight.explanation}</p>
-              <p>
-                <strong title="Actionable SQL or indexing step to improve this node.">Recommendation:</strong>{" "}
-                {insight.recommendation}
+              <p className="node-insight-summary" title="What this means for the execution behavior of this node.">
+                {expandedNodeInsightId === index
+                  ? insight.explanation
+                  : `${String(insight.explanation || "").split(".")[0]}.`}
               </p>
+              <button
+                type="button"
+                className="insight-expand-btn"
+                onClick={() => setExpandedNodeInsightId((value) => (value === index ? null : index))}
+              >
+                {expandedNodeInsightId === index ? "Hide details" : "View details"}
+              </button>
+              {expandedNodeInsightId === index && (
+                <div className="node-insight-expanded">
+                  <p className="node-insight-recommendation">
+                    <strong title="Actionable SQL or indexing step to improve this node.">Recommendation:</strong>{" "}
+                    {insight.recommendation}
+                  </p>
+                </div>
+              )}
             </article>
           ))}
         </div>
