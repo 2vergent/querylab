@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import parseInput from "./parser";
 import canonicalize from "./canonicalize";
 import statsEngine from "./statsEngine";
@@ -58,10 +58,152 @@ function buildSummary(root) {
   };
 }
 
+function extractColumns(text) {
+  const source = String(text || "");
+  const matches = source.match(/[a-zA-Z_][\w]*\.[a-zA-Z_][\w]*/g) || [];
+  return Array.from(new Set(matches));
+}
+
+function explainNode(node) {
+  const type = node.nodeType || "Operator";
+  if (/Seq Scan/i.test(type)) {
+    return "Sequential scan reads table pages directly and evaluates predicates row by row.";
+  }
+  if (/Index Scan|Index Only Scan/i.test(type)) {
+    return "Index-driven access path uses key lookups instead of scanning full table pages.";
+  }
+  if (/Nested Loop/i.test(type)) {
+    return "Nested loop joins each outer row with matching inner rows; expensive when inner side is not selective.";
+  }
+  if (/Hash Join/i.test(type)) {
+    return "Hash join builds a hash table on one input and probes it with rows from the other input.";
+  }
+  if (/Sort/i.test(type)) {
+    return "Sort orders rows for ORDER BY, merge joins, or grouped operations.";
+  }
+  if (/Aggregate|GroupAggregate/i.test(type)) {
+    return "Aggregate computes grouped or global summaries from input rows.";
+  }
+  return "Execution operator participating in the query plan.";
+}
+
+function formatMs(value) {
+  return `${formatNumber(value)} ms`;
+}
+
+function buildNodeTypeStats(root) {
+  const nodes = flattenTree(root);
+  const map = new Map();
+  for (const node of nodes) {
+    const key = node.nodeType || "Unknown";
+    if (!map.has(key)) {
+      map.set(key, {
+        nodeType: key,
+        count: 0,
+        selfTime: 0,
+        effectiveTime: 0,
+      });
+    }
+    const row = map.get(key);
+    row.count += 1;
+    row.selfTime += node.derived.selfTime || 0;
+    row.effectiveTime += node.derived.effectiveTime || 0;
+  }
+  return Array.from(map.values()).sort((a, b) => b.selfTime - a.selfTime);
+}
+
+function buildRelationStats(root) {
+  const nodes = flattenTree(root).filter((node) => node.relationName);
+  const map = new Map();
+  for (const node of nodes) {
+    const key = node.relationName;
+    if (!map.has(key)) {
+      map.set(key, {
+        relationName: key,
+        scanCount: 0,
+        totalTime: 0,
+        nodeTypes: new Set(),
+      });
+    }
+    const row = map.get(key);
+    row.scanCount += /scan/i.test(node.nodeType) ? 1 : 0;
+    row.totalTime += node.derived.selfTime || 0;
+    row.nodeTypes.add(node.nodeType);
+  }
+  return Array.from(map.values())
+    .map((row) => ({ ...row, nodeTypes: Array.from(row.nodeTypes) }))
+    .sort((a, b) => b.totalTime - a.totalTime);
+}
+
+function toDisplayValue(value) {
+  if (Array.isArray(value)) return value.join(", ");
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function getNodeSqlDetails(node) {
+  const raw = node.raw || {};
+  const details = [];
+
+  if (node.metadata.groupKey?.length > 0) details.push({ label: "Group By", value: node.metadata.groupKey.join(", ") });
+  if (node.metadata.sortKey?.length > 0) details.push({ label: "Sort Key", value: node.metadata.sortKey.join(", ") });
+  if (node.metadata.indexCond) details.push({ label: "Index Condition", value: node.metadata.indexCond });
+  if (raw["Filter"] || node.metadata.filter) details.push({ label: "Filter", value: raw["Filter"] || node.metadata.filter });
+  if (raw["Hash Cond"] || node.metadata.hashCond) details.push({ label: "Hash Condition", value: raw["Hash Cond"] || node.metadata.hashCond });
+  if (raw["Join Filter"] || node.metadata.joinFilter) details.push({ label: "Join Filter", value: raw["Join Filter"] || node.metadata.joinFilter });
+  if (raw["Recheck Cond"] || node.metadata.recheckCond) details.push({ label: "Recheck Condition", value: raw["Recheck Cond"] || node.metadata.recheckCond });
+  if (node.metadata.mergeCond) details.push({ label: "Merge Condition", value: node.metadata.mergeCond });
+  if (raw["Rows Removed by Filter"] !== undefined) {
+    details.push({ label: "Rows Removed by Filter", value: formatNumber(Number(raw["Rows Removed by Filter"]), 0) });
+  }
+  if (node.metadata.rowsRemovedByIndexRecheck > 0) {
+    details.push({ label: "Rows Removed by Index Recheck", value: formatNumber(node.metadata.rowsRemovedByIndexRecheck, 0) });
+  }
+  if (node.metadata.cacheKey) details.push({ label: "Cache Key", value: node.metadata.cacheKey });
+  if (node.metadata.cacheMode) details.push({ label: "Cache Mode", value: node.metadata.cacheMode });
+  if (node.metadata.cacheHits || node.metadata.cacheMisses || node.metadata.cacheEvictions || node.metadata.cacheOverflows) {
+    details.push({
+      label: "Cache Stats",
+      value: `hits=${formatNumber(node.metadata.cacheHits, 0)}, misses=${formatNumber(node.metadata.cacheMisses, 0)}, evictions=${formatNumber(node.metadata.cacheEvictions, 0)}, overflows=${formatNumber(node.metadata.cacheOverflows, 0)}`,
+    });
+  }
+  if (node.metadata.peakMemoryUsage > 0) {
+    details.push({ label: "Peak Memory Usage", value: `${formatNumber(node.metadata.peakMemoryUsage, 0)} kB` });
+  }
+  if (node.metadata.hashBuckets > 0 || node.metadata.hashBatches > 0) {
+    details.push({
+      label: "Hash Storage",
+      value: `buckets=${formatNumber(node.metadata.hashBuckets, 0)}, batches=${formatNumber(node.metadata.hashBatches, 0)}`,
+    });
+  }
+
+  const sortMethod = node.metadata.sortMethod || raw["Sort Method"];
+  if (sortMethod) {
+    const sortSpaceType = node.metadata.sortSpaceType || raw["Sort Space Type"] || "Unknown";
+    const sortSpaceUsed = node.metadata.sortSpaceUsed || raw["Sort Space Used"] || 0;
+    details.push({
+      label: "Sort Strategy",
+      value: `${sortMethod} (${sortSpaceType}${sortSpaceUsed ? `, ${formatNumber(sortSpaceUsed, 0)} kB` : ""})`,
+    });
+  }
+
+  const columnSource = details.map((item) => item.value).join(" ");
+  const referencedColumns = extractColumns(columnSource);
+  const rawKeyValues = Object.entries(raw)
+    .filter(([key]) => !["Plans", "Workers", "children"].includes(key))
+    .map(([key, value]) => ({ key, value: toDisplayValue(value) }));
+
+  return {
+    explanation: explainNode(node),
+    details,
+    referencedColumns,
+    rawKeyValues,
+  };
+}
+
 function getInsightSeverityForNode(nodeId, insights) {
-  const matches = insights.filter((item) => item.nodeId === nodeId);
-  if (matches.length === 0) return null;
-  return matches.reduce((best, item) => {
+  if (!insights || insights.length === 0) return null;
+  return insights.reduce((best, item) => {
     if (!best) return item.severity;
     return severityRank[item.severity] > severityRank[best] ? item.severity : best;
   }, null);
@@ -75,11 +217,28 @@ function App() {
   const [useSelfTime, setUseSelfTime] = useState(false);
   const [highlightMismatch, setHighlightMismatch] = useState(true);
   const [showEstVsActual, setShowEstVsActual] = useState(true);
-  const [searchNodeType, setSearchNodeType] = useState("");
   const [treeRenderSeed, setTreeRenderSeed] = useState(0);
   const [defaultOpen, setDefaultOpen] = useState(true);
+  const [scrollToStatsPending, setScrollToStatsPending] = useState(false);
+  const statsSectionRef = useRef(null);
 
   const summary = useMemo(() => (tree ? buildSummary(tree) : null), [tree]);
+  const nodeTypeStats = useMemo(() => (tree ? buildNodeTypeStats(tree) : []), [tree]);
+  const relationStats = useMemo(() => (tree ? buildRelationStats(tree) : []), [tree]);
+  const insightsByNode = useMemo(() => {
+    const map = new Map();
+    for (const insight of insights) {
+      if (!map.has(insight.nodeId)) map.set(insight.nodeId, []);
+      map.get(insight.nodeId).push(insight);
+    }
+    return map;
+  }, [insights]);
+
+  useEffect(() => {
+    if (!scrollToStatsPending || !tree || !statsSectionRef.current) return;
+    statsSectionRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    setScrollToStatsPending(false);
+  }, [scrollToStatsPending, tree]);
 
   function analyze() {
     setParseError("");
@@ -94,10 +253,12 @@ function App() {
 
       setTree(canonical);
       setInsights(nextInsights);
+      setScrollToStatsPending(true);
     } catch (error) {
       setTree(null);
       setInsights([]);
       setParseError(error.message || "Unable to parse plan.");
+      setScrollToStatsPending(false);
     }
   }
 
@@ -150,34 +311,9 @@ function App() {
                 Show estimated vs actual
               </label>
             </div>
-            <div className="control-row">
-              <input
-                value={searchNodeType}
-                onChange={(event) => setSearchNodeType(event.target.value)}
-                placeholder="Search node type..."
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  setDefaultOpen(true);
-                  setTreeRenderSeed((value) => value + 1);
-                }}
-              >
-                Expand All
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setDefaultOpen(false);
-                  setTreeRenderSeed((value) => value + 1);
-                }}
-              >
-                Collapse All
-              </button>
-            </div>
           </section>
 
-          <section className="panel summary-grid">
+          <section ref={statsSectionRef} className="panel summary-grid">
             <SummaryCard title="Total Execution Time" value={`${formatNumber(summary.totalExecutionTime)} ms`} />
             <SummaryCard
               title="Worst Self Time Node"
@@ -204,27 +340,29 @@ function App() {
           </section>
 
           <section className="panel">
-            <h2>Insights</h2>
-            <div className="insight-list">
-              {insights.map((insight, index) => (
-                <article key={`${insight.nodeId}-${index}`} className={`insight insight-${insight.severity}`}>
-                  <div className="insight-header">
-                    <span className={`badge badge-${insight.severity}`}>{insight.severity.toUpperCase()}</span>
-                    <span className="category">{insight.category}</span>
-                    <h3>{insight.title}</h3>
-                  </div>
-                  <p>{insight.explanation}</p>
-                  <p>
-                    <strong>Recommendation:</strong> {insight.recommendation}
-                  </p>
-                </article>
-              ))}
-              {insights.length === 0 && <div className="empty">No rule triggers on this plan.</div>}
+            <div className="execution-header">
+              <h2>Execution Tree</h2>
+              <div className="execution-actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDefaultOpen(true);
+                    setTreeRenderSeed((value) => value + 1);
+                  }}
+                >
+                  Expand All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDefaultOpen(false);
+                    setTreeRenderSeed((value) => value + 1);
+                  }}
+                >
+                  Collapse All
+                </button>
+              </div>
             </div>
-          </section>
-
-          <section className="panel">
-            <h2>Execution Tree</h2>
             <TreeNode
               key={`${tree.id}-${treeRenderSeed}`}
               node={tree}
@@ -233,10 +371,57 @@ function App() {
               useSelfTime={useSelfTime}
               highlightMismatch={highlightMismatch}
               showEstVsActual={showEstVsActual}
-              searchNodeType={searchNodeType}
-              insights={insights}
+              insightsByNode={insightsByNode}
               renderSeed={treeRenderSeed}
             />
+          </section>
+
+          <section className="panel panel-table">
+            <h2>Statistics by Node Type</h2>
+            <table className="stats-table">
+              <thead>
+                <tr>
+                  <th align="left">Node Type</th>
+                  <th align="left">Count</th>
+                  <th align="left">Exclusive Time</th>
+                  <th align="left">% of Query (exclusive)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {nodeTypeStats.map((row) => (
+                  <tr key={row.nodeType}>
+                    <td>{row.nodeType}</td>
+                    <td>{row.count}</td>
+                    <td>{formatMs(row.selfTime)}</td>
+                    <td>{formatNumber((row.selfTime / Math.max(1, summary.totalExecutionTime)) * 100)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+
+          <section className="panel panel-table">
+            <h2>Statistics by Relation</h2>
+            <table className="stats-table">
+              <thead>
+                <tr>
+                  <th align="left">Relation</th>
+                  <th align="left">Scan Count</th>
+                  <th align="left">Total Exclusive Time</th>
+                  <th align="left">Node Types</th>
+                </tr>
+              </thead>
+              <tbody>
+                {relationStats.map((row) => (
+                  <tr key={row.relationName}>
+                    <td>{row.relationName}</td>
+                    <td>{row.scanCount}</td>
+                    <td>{formatMs(row.totalTime)}</td>
+                    <td>{row.nodeTypes.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </section>
         </>
       )}
@@ -260,11 +445,12 @@ function TreeNode({
   useSelfTime,
   highlightMismatch,
   showEstVsActual,
-  searchNodeType,
-  insights,
+  insightsByNode,
   renderSeed,
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [showInsights, setShowInsights] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
 
   const metricValue = useSelfTime ? node.derived.selfTime : node.derived.effectiveTime;
   const ratio = Math.min(1, metricValue / Math.max(1, rootMetricMax));
@@ -275,18 +461,25 @@ function TreeNode({
       : Math.max(mismatchRatio, 1 / mismatchRatio);
   const isMismatch = foldedMismatch > 3;
   const isHighSelf = node.derived.selfTime > 0.2 * Math.max(1, rootMetricMax);
-  const normalizedSearch = searchNodeType.trim().toLowerCase();
-  const subtreeMatches = (candidate) => {
-    if (!normalizedSearch) return true;
-    if (candidate.nodeType.toLowerCase().includes(normalizedSearch)) return true;
-    return candidate.children.some(subtreeMatches);
-  };
-  const matchesSearch = subtreeMatches(node);
-  const severity = getInsightSeverityForNode(node.id, insights);
-
-  if (!matchesSearch) {
-    return null;
-  }
+  const nodeInsights = insightsByNode.get(node.id) || [];
+  const severity = getInsightSeverityForNode(node.id, nodeInsights);
+  const sqlDetails = getNodeSqlDetails(node);
+  const rowRatio =
+    node.estimatedRows > 0 ? node.actual.rows / node.estimatedRows : node.actual.rows > 0 ? Number.POSITIVE_INFINITY : 1;
+  const estimateError = Math.max(rowRatio, 1 / Math.max(rowRatio, 1e-9));
+  const performanceSignals = [
+    { label: "Inclusive", value: formatMs(node.derived.effectiveTime) },
+    { label: "Exclusive", value: formatMs(node.derived.selfTime) },
+    { label: "Time Share", value: `${formatNumber(node.derived.timePercent * 100)}%` },
+    { label: "Estimate Error", value: `${formatNumber(estimateError)}x` },
+    { label: "Amplification", value: `${formatNumber(node.derived.amplificationFactor || 0)}x` },
+    { label: "Buffers Read", value: formatNumber(node.derived.totalBuffersRead, 0) },
+    { label: "Disk Spill", value: node.derived.diskSpillDetected ? "Yes" : "No" },
+    {
+      label: "Workers",
+      value: `${formatNumber(node.workers.launched, 0)} / ${formatNumber(node.workers.planned, 0)}`,
+    },
+  ];
 
   const tooltip =
     `actual rows: ${formatNumber(node.actual.rows, 0)}\n` +
@@ -316,11 +509,29 @@ function TreeNode({
             {node.relationName && <span> on {node.relationName}</span>}
             {node.indexName && <span> using {node.indexName}</span>}
             {severity && <span className={`badge badge-${severity}`}>{severity.toUpperCase()}</span>}
+            <button
+              type="button"
+              onClick={() => setShowDetails((value) => !value)}
+              className="node-action-btn"
+              title="Show SQL-level node details such as filters, join/sort keys, and referenced columns."
+            >
+              {showDetails ? "Hide Details" : "Details"}
+            </button>
+            {nodeInsights.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowInsights((value) => !value)}
+                className="node-action-btn"
+                title="Show optimizer findings for this node and why they matter."
+              >
+                {showInsights ? "Hide Insights" : `Insights (${nodeInsights.length})`}
+              </button>
+            )}
           </div>
           {showEstVsActual && (
             <div className="node-metrics">
               est rows {formatNumber(node.estimatedRows, 0)} | actual rows {formatNumber(node.actual.rows, 0)} | loops{" "}
-              {formatNumber(node.actual.loops, 0)}
+              {formatNumber(node.actual.loops, 0)} | row ratio {formatNumber(rowRatio)}
             </div>
           )}
         </div>
@@ -334,6 +545,69 @@ function TreeNode({
         <div className="bar-fill" style={{ width: `${ratio * 100}%` }} />
       </div>
 
+      {showDetails && (
+        <div className="node-details">
+          <div className="node-details-summary">
+            <strong>Operator Summary:</strong> {sqlDetails.explanation}
+          </div>
+          {sqlDetails.referencedColumns.length > 0 && (
+            <div className="node-details-columns">
+              <strong>Referenced Columns:</strong> {sqlDetails.referencedColumns.join(", ")}
+            </div>
+          )}
+          {sqlDetails.details.length > 0 ? (
+            <div className="node-kv-grid">
+              {sqlDetails.details.map((item, index) => (
+                <div key={`${item.label}-${index}`} className="node-kv-row">
+                  <strong>{item.label}:</strong> {String(item.value)}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="node-kv-empty">No additional SQL-level metadata reported for this node.</div>
+          )}
+          <div className="signal-grid">
+            {performanceSignals.map((signal) => (
+              <div key={signal.label} className="signal-card">
+                <span>{signal.label}</span>
+                <strong>{signal.value}</strong>
+              </div>
+            ))}
+          </div>
+          <details className="raw-details">
+            <summary>
+              Raw Node Properties ({sqlDetails.rawKeyValues.length})
+            </summary>
+            <div className="node-kv-grid raw-grid">
+              {sqlDetails.rawKeyValues.map((entry) => (
+                <div key={entry.key} className="node-kv-row">
+                  <strong>{entry.key}:</strong> {entry.value}
+                </div>
+              ))}
+            </div>
+          </details>
+        </div>
+      )}
+
+      {showInsights && nodeInsights.length > 0 && (
+        <div className="insight-list node-insights-list">
+          {nodeInsights.map((insight, index) => (
+            <article key={`${insight.nodeId}-${index}`} className={`insight insight-${insight.severity}`}>
+              <div className="insight-header">
+                <span className={`badge badge-${insight.severity}`}>{insight.severity.toUpperCase()}</span>
+                <span className="category">{insight.category}</span>
+                <h3>{insight.title}</h3>
+              </div>
+              <p title="What this means for the execution behavior of this node.">{insight.explanation}</p>
+              <p>
+                <strong title="Actionable SQL or indexing step to improve this node.">Recommendation:</strong>{" "}
+                {insight.recommendation}
+              </p>
+            </article>
+          ))}
+        </div>
+      )}
+
       {open && node.children.length > 0 && (
         <div className="children">
           {node.children.map((child) => (
@@ -345,8 +619,7 @@ function TreeNode({
               useSelfTime={useSelfTime}
               highlightMismatch={highlightMismatch}
               showEstVsActual={showEstVsActual}
-              searchNodeType={searchNodeType}
-              insights={insights}
+              insightsByNode={insightsByNode}
               renderSeed={renderSeed}
             />
           ))}

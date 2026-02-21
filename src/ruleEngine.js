@@ -1,11 +1,32 @@
 export default function ruleEngine(tree) {
-  const insights = [];
+  const severityRank = { high: 3, medium: 2, low: 1 };
+  const insightsByKey = new Map();
 
   const addInsight = (node, payload) => {
-    insights.push({
+    const insight = {
       ...payload,
       nodeId: node.id,
-    });
+      nodeType: node.nodeType,
+      relationName: node.relationName,
+      timePercent: node.derived.timePercent || 0,
+    };
+
+    const key = `${insight.nodeId}:${insight.category}`;
+    const existing = insightsByKey.get(key);
+    if (!existing) {
+      insightsByKey.set(key, insight);
+      return;
+    }
+
+    const existingSeverity = severityRank[existing.severity] || 0;
+    const nextSeverity = severityRank[insight.severity] || 0;
+    if (nextSeverity > existingSeverity) {
+      insightsByKey.set(key, insight);
+      return;
+    }
+    if (nextSeverity === existingSeverity && insight.timePercent > existing.timePercent) {
+      insightsByKey.set(key, insight);
+    }
   };
 
   const rules = [
@@ -167,5 +188,10 @@ export default function ruleEngine(tree) {
   }
 
   walk(tree);
-  return insights;
+  return Array.from(insightsByKey.values()).sort((a, b) => {
+    const aSeverity = severityRank[a.severity] || 0;
+    const bSeverity = severityRank[b.severity] || 0;
+    if (bSeverity !== aSeverity) return bSeverity - aSeverity;
+    return (b.timePercent || 0) - (a.timePercent || 0);
+  });
 }

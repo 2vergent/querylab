@@ -19,13 +19,15 @@ function parseMaybeSizeKb(value) {
 
 function parseBuffers(line) {
   const clean = line.replace(/^Buffers:\s*/i, "");
-  const parts = clean.match(/(shared|local|temp)\s+(?:hit|read|written|dirtied)=\d+/gi) || [];
   const result = {};
+  const tokenRegex = /\b(?:(shared|local|temp)\s+)?(hit|read|written|dirtied)=([0-9]+)/gi;
+  let currentScope = null;
+  let match = null;
 
-  for (const part of parts) {
-    const match = part.match(/(shared|local|temp)\s+(hit|read|written|dirtied)=([0-9]+)/i);
-    if (!match) continue;
-    const scope = match[1].toLowerCase();
+  while ((match = tokenRegex.exec(clean)) !== null) {
+    const scope = (match[1] || currentScope || "").toLowerCase();
+    if (!scope) continue;
+    currentScope = scope;
     const kind = match[2].toLowerCase();
     const value = Number(match[3]);
     result[`${scope}${kind[0].toUpperCase()}${kind.slice(1)}`] = value;
@@ -84,28 +86,82 @@ function parseNodeLine(content) {
   };
 }
 
+function normalizePgAdminText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return raw;
+
+  const quotedBlocks = [...raw.matchAll(/"([^"]*)"/g)].map((match) => match[1]);
+  let normalized = quotedBlocks.length > 1 ? quotedBlocks.join("\n") : raw;
+
+  normalized = normalized
+    .split(/\r?\n/)
+    .map((line) => {
+      let next = line.trimEnd();
+      if (next.endsWith(",")) next = next.slice(0, -1);
+      if (next.startsWith('"')) next = next.slice(1);
+      if (next.endsWith('"')) next = next.slice(0, -1);
+      return next;
+    })
+    .join("\n");
+
+  return normalized;
+}
+
 function parseText(text) {
-  const lines = text.split(/\r?\n/);
+  const normalizedText = normalizePgAdminText(text);
+  const lines = normalizedText.split(/\r?\n/);
   const stack = [];
+  const frameStack = [];
   let root = null;
   let lastNode = null;
+  let inPlanningSection = false;
+
+  const arrowIndents = lines
+    .filter((line) => /^\s*->/.test(line || ""))
+    .map((line) => line.indexOf("->"))
+    .filter((value) => value >= 0);
+  const flattenedArrowLayout = arrowIndents.length >= 3 && new Set(arrowIndents).size === 1;
+
+  const expectedChildren = (nodeType) => {
+    if (!nodeType) return 1;
+    if (/Join/i.test(nodeType) || nodeType === "Nested Loop") return 2;
+    if (nodeType === "Bitmap Heap Scan") return 1;
+    if (nodeType === "Hash") return 1;
+    if (nodeType === "Sort") return 1;
+    if (nodeType === "Gather" || nodeType === "Gather Merge") return 1;
+    if (nodeType === "GroupAggregate" || nodeType === "Aggregate") return 1;
+    if (nodeType === "Memoize" || nodeType === "Materialize") return 1;
+    if (/Scan$/i.test(nodeType)) return 0;
+    return 1;
+  };
 
   for (const rawLine of lines) {
     if (!rawLine || !rawLine.trim()) continue;
 
     const indent = rawLine.search(/\S/);
     const content = rawLine.trim();
+    const workerNormalizedContent = content.replace(/^Worker\s+\d+:\s*/i, "");
 
-    if (/^(Planning Time|Execution Time):/i.test(content)) {
+    if (/^Planning:/i.test(workerNormalizedContent)) {
+      inPlanningSection = true;
       continue;
     }
 
+    if (/^(Planning Time|Execution Time):/i.test(workerNormalizedContent)) {
+      if (/^Execution Time:/i.test(workerNormalizedContent)) {
+        inPlanningSection = false;
+      }
+      continue;
+    }
+
+    if (inPlanningSection) continue;
+
     const isNodeLine =
-      /^(->\s*)?[A-Za-z][A-Za-z ]*(\s+using\s+\S+)?(\s+on\s+\S+)?\s+\(cost=/i.test(content) ||
-      /^(->\s*)?[A-Za-z][A-Za-z ]*(\s+using\s+\S+)?(\s+on\s+\S+)?\s+\(actual\s+time=/i.test(content);
+      /^(->\s*)?[A-Za-z][A-Za-z ]*(\s+using\s+\S+)?(\s+on\s+\S+)?\s+\(cost=/i.test(workerNormalizedContent) ||
+      /^(->\s*)?[A-Za-z][A-Za-z ]*(\s+using\s+\S+)?(\s+on\s+\S+)?\s+\(actual\s+time=/i.test(workerNormalizedContent);
 
     if (isNodeLine) {
-      const parsed = parseNodeLine(content);
+      const parsed = parseNodeLine(workerNormalizedContent);
       const node = {
         "Node Type": parsed.nodeType,
         "Relation Name": parsed.relationName,
@@ -122,25 +178,46 @@ function parseText(text) {
         _indent: indent,
       };
 
-      while (stack.length && stack[stack.length - 1]._indent >= indent) {
-        stack.pop();
-      }
+      if (!flattenedArrowLayout) {
+        while (stack.length && stack[stack.length - 1]._indent >= indent) {
+          stack.pop();
+        }
 
-      if (stack.length === 0) {
-        root = node;
+        if (stack.length === 0) {
+          root = node;
+        } else {
+          stack[stack.length - 1].children.push(node);
+        }
+        stack.push(node);
       } else {
-        stack[stack.length - 1].children.push(node);
+        if (!root) {
+          root = node;
+          const children = expectedChildren(node["Node Type"]);
+          if (children > 0) frameStack.push({ node, remaining: children });
+        } else {
+          while (frameStack.length > 0 && frameStack[frameStack.length - 1].remaining <= 0) {
+            frameStack.pop();
+          }
+          const parentFrame = frameStack[frameStack.length - 1];
+          const parent = parentFrame?.node || root;
+          parent.children.push(node);
+          if (parentFrame && parentFrame.remaining > 0) {
+            parentFrame.remaining -= 1;
+          }
+
+          const children = expectedChildren(node["Node Type"]);
+          if (children > 0) frameStack.push({ node, remaining: children });
+        }
       }
 
-      stack.push(node);
       lastNode = node;
       continue;
     }
 
     if (!lastNode) continue;
 
-    if (/^Buffers:/i.test(content)) {
-      const parsed = parseBuffers(content);
+    if (/^Buffers:/i.test(workerNormalizedContent)) {
+      const parsed = parseBuffers(workerNormalizedContent);
       for (const [k, v] of Object.entries(parsed)) {
         if (k === "sharedHit") lastNode["Shared Hit Blocks"] = v;
         if (k === "sharedRead") lastNode["Shared Read Blocks"] = v;
@@ -167,7 +244,7 @@ function parseText(text) {
 
     let matchedCondition = false;
     for (const [pattern, key] of conditionPatterns) {
-      const match = content.match(pattern);
+      const match = workerNormalizedContent.match(pattern);
       if (match) {
         lastNode[key] = match[1].trim();
         matchedCondition = true;
@@ -176,7 +253,7 @@ function parseText(text) {
     }
     if (matchedCondition) continue;
 
-    const workersMatch = content.match(/^Workers\s+(Planned|Launched):\s*([0-9]+)/i);
+    const workersMatch = workerNormalizedContent.match(/^Workers\s+(Planned|Launched):\s*([0-9]+)/i);
     if (workersMatch) {
       const kind = workersMatch[1].toLowerCase();
       const value = Number(workersMatch[2]);
@@ -185,7 +262,7 @@ function parseText(text) {
       continue;
     }
 
-    const sortMethodMatch = content.match(
+    const sortMethodMatch = workerNormalizedContent.match(
       /^Sort Method:\s*([A-Za-z ]+?)(?:\s+Memory:\s*([0-9.]+\s*(?:kB|MB|GB)?))?(?:\s+Disk:\s*([0-9.]+\s*(?:kB|MB|GB)?))?$/i,
     );
     if (sortMethodMatch) {
@@ -201,9 +278,25 @@ function parseText(text) {
       continue;
     }
 
-    const heapFetchesMatch = content.match(/^Heap Fetches:\s*([0-9]+)/i);
+    const heapFetchesMatch = workerNormalizedContent.match(/^Heap Fetches:\s*([0-9]+)/i);
     if (heapFetchesMatch) {
       lastNode["Heap Fetches"] = Number(heapFetchesMatch[1]);
+      continue;
+    }
+
+    const rowsRemovedMatch = workerNormalizedContent.match(/^Rows Removed by Filter:\s*([0-9]+)/i);
+    if (rowsRemovedMatch) {
+      lastNode["Rows Removed by Filter"] = Number(rowsRemovedMatch[1]);
+      continue;
+    }
+
+    const keyValueMatch = workerNormalizedContent.match(/^([A-Za-z][A-Za-z ]+):\s*(.+)$/);
+    if (keyValueMatch) {
+      const key = keyValueMatch[1].trim();
+      const value = keyValueMatch[2].trim();
+      if (key && value) {
+        lastNode[key] = value;
+      }
     }
   }
 

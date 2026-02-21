@@ -18,6 +18,18 @@ function pickFirst(raw, keys) {
   return null;
 }
 
+function normalizeList(value) {
+  if (value === undefined || value === null) return [];
+  if (Array.isArray(value)) return value.map((item) => String(item));
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+  }
+  return [String(value)];
+}
+
 export default function canonicalize(node) {
   function transform(n) {
     const raw = n || {};
@@ -70,10 +82,25 @@ export default function canonicalize(node) {
         hashCond,
         joinFilter,
         recheckCond,
+        indexCond: normalizeText(raw["Index Cond"]),
+        mergeCond: normalizeText(raw["Merge Cond"]),
+        groupKey: normalizeList(raw["Group Key"]),
+        sortKey: normalizeList(raw["Sort Key"]),
         sortMethod: normalizeText(raw["Sort Method"] || raw.metadata?.sortMethod),
         sortSpaceUsed: asNumber(raw["Sort Space Used"] ?? raw.metadata?.sortSpaceUsed, 0),
         sortSpaceType: normalizeText(raw["Sort Space Type"] || raw.metadata?.sortSpaceType),
         heapFetches: asNumber(raw["Heap Fetches"] ?? raw.metadata?.heapFetches, 0),
+        rowsRemovedByFilter: asNumber(raw["Rows Removed by Filter"], 0),
+        rowsRemovedByIndexRecheck: asNumber(raw["Rows Removed by Index Recheck"], 0),
+        cacheKey: normalizeText(raw["Cache Key"]),
+        cacheMode: normalizeText(raw["Cache Mode"]),
+        cacheHits: asNumber(raw["Cache Hits"] ?? raw["Hits"], 0),
+        cacheMisses: asNumber(raw["Cache Misses"] ?? raw["Misses"], 0),
+        cacheEvictions: asNumber(raw["Cache Evictions"] ?? raw["Evictions"], 0),
+        cacheOverflows: asNumber(raw["Cache Overflows"] ?? raw["Overflows"], 0),
+        peakMemoryUsage: asNumber(raw["Peak Memory Usage"], 0),
+        hashBuckets: asNumber(raw["Hash Buckets"] ?? raw["Buckets"], 0),
+        hashBatches: asNumber(raw["Hash Batches"] ?? raw["Batches"], 0),
       },
       children: children.map(transform),
       derived: {},
