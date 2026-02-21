@@ -48,10 +48,10 @@ function parseNodeLine(content) {
   const loopsMatch = actualGroupMatch?.[0]?.match(/loops=\s*([0-9]+)/i);
 
   const descriptor = core.split(/\s+\(cost=/i)[0].trim();
-  const usingOnMatch = descriptor.match(/^(?<nodeType>[A-Za-z][A-Za-z ]*?)\s+using\s+(?<indexName>\S+)\s+on\s+(?<relationName>\S+)/);
-  const onMatch = descriptor.match(/^(?<nodeType>[A-Za-z][A-Za-z ]*?)\s+on\s+(?<relationName>\S+)/);
-  const usingMatch = descriptor.match(/^(?<nodeType>[A-Za-z][A-Za-z ]*?)\s+using\s+(?<indexName>\S+)/);
-  const plainTypeMatch = descriptor.match(/^(?<nodeType>[A-Za-z][A-Za-z ]*)$/);
+  const usingOnMatch = descriptor.match(/^(?<nodeType>[A-Za-z][A-Za-z0-9 _]*?)\s+using\s+(?<indexName>\S+)\s+on\s+(?<relationName>\S+)/);
+  const onMatch = descriptor.match(/^(?<nodeType>[A-Za-z][A-Za-z0-9 _]*?)\s+on\s+(?<relationName>\S+)/);
+  const usingMatch = descriptor.match(/^(?<nodeType>[A-Za-z][A-Za-z0-9 _]*?)\s+using\s+(?<indexName>\S+)/);
+  const plainTypeMatch = descriptor.match(/^(?<nodeType>[A-Za-z][A-Za-z0-9 _]*)$/);
 
   let nodeType = "Unknown";
   let relationName = null;
@@ -111,34 +111,17 @@ function parseText(text) {
   const normalizedText = normalizePgAdminText(text);
   const lines = normalizedText.split(/\r?\n/);
   const stack = [];
-  const frameStack = [];
   let root = null;
   let lastNode = null;
   let inPlanningSection = false;
 
-  const arrowIndents = lines
-    .filter((line) => /^\s*->/.test(line || ""))
-    .map((line) => line.indexOf("->"))
-    .filter((value) => value >= 0);
-  const flattenedArrowLayout = arrowIndents.length >= 3 && new Set(arrowIndents).size === 1;
-
-  const expectedChildren = (nodeType) => {
-    if (!nodeType) return 1;
-    if (/Join/i.test(nodeType) || nodeType === "Nested Loop") return 2;
-    if (nodeType === "Bitmap Heap Scan") return 1;
-    if (nodeType === "Hash") return 1;
-    if (nodeType === "Sort") return 1;
-    if (nodeType === "Gather" || nodeType === "Gather Merge") return 1;
-    if (nodeType === "GroupAggregate" || nodeType === "Aggregate") return 1;
-    if (nodeType === "Memoize" || nodeType === "Materialize") return 1;
-    if (/Scan$/i.test(nodeType)) return 0;
-    return 1;
-  };
-
   for (const rawLine of lines) {
     if (!rawLine || !rawLine.trim()) continue;
 
-    const indent = rawLine.search(/\S/);
+    let indent = rawLine.indexOf("->");
+    if (indent === -1) {
+      indent = rawLine.search(/\S/);
+    }
     const content = rawLine.trim();
     const workerNormalizedContent = content.replace(/^Worker\s+\d+:\s*/i, "");
 
@@ -157,8 +140,8 @@ function parseText(text) {
     if (inPlanningSection) continue;
 
     const isNodeLine =
-      /^(->\s*)?[A-Za-z][A-Za-z ]*(\s+using\s+\S+)?(\s+on\s+\S+)?\s+\(cost=/i.test(workerNormalizedContent) ||
-      /^(->\s*)?[A-Za-z][A-Za-z ]*(\s+using\s+\S+)?(\s+on\s+\S+)?\s+\(actual\s+time=/i.test(workerNormalizedContent);
+      /\(cost=/.test(workerNormalizedContent) ||
+      /\(actual\s+time=/.test(workerNormalizedContent);
 
     if (isNodeLine) {
       const parsed = parseNodeLine(workerNormalizedContent);
@@ -178,37 +161,17 @@ function parseText(text) {
         _indent: indent,
       };
 
-      if (!flattenedArrowLayout) {
-        while (stack.length && stack[stack.length - 1]._indent >= indent) {
-          stack.pop();
-        }
-
-        if (stack.length === 0) {
-          root = node;
-        } else {
-          stack[stack.length - 1].children.push(node);
-        }
-        stack.push(node);
-      } else {
-        if (!root) {
-          root = node;
-          const children = expectedChildren(node["Node Type"]);
-          if (children > 0) frameStack.push({ node, remaining: children });
-        } else {
-          while (frameStack.length > 0 && frameStack[frameStack.length - 1].remaining <= 0) {
-            frameStack.pop();
-          }
-          const parentFrame = frameStack[frameStack.length - 1];
-          const parent = parentFrame?.node || root;
-          parent.children.push(node);
-          if (parentFrame && parentFrame.remaining > 0) {
-            parentFrame.remaining -= 1;
-          }
-
-          const children = expectedChildren(node["Node Type"]);
-          if (children > 0) frameStack.push({ node, remaining: children });
-        }
+      while (stack.length && stack[stack.length - 1]._indent >= indent) {
+        stack.pop();
       }
+
+      if (stack.length === 0) {
+        root = node;
+      } else {
+        stack[stack.length - 1].children.push(node);
+      }
+
+      stack.push(node);
 
       lastNode = node;
       continue;
